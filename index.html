@@ -1,23 +1,116 @@
-<!doctype html><meta charset="utf-8"><title>OSMD Test</title>
-<div id="score" style="max-width:900px;margin:24px auto;"></div>
+<!doctype html><meta charset="utf-8"><title>Score Prototype</title>
+<style>
+body{font:16px/1.4 system-ui,apple-system,sans-serif;max-width:980px;margin:24px auto;padding:0 12px}
+#ui{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+#ui > *{padding:6px 10px;border:1px solid #ccc;border-radius:6px;background:#f7f7f7}
+button{cursor:pointer}
+label{border:none;background:none;padding:0;margin-right:6px}
+.row{width:100%;display:flex;gap:8px;align-items:center}
+</style>
+
+<div id="ui">
+  <div class="row">
+    <label>Duration</label>
+    <button data-dur="32">Whole</button>
+    <button data-dur="16">Half</button>
+    <button data-dur="8">Quarter</button>
+    <button data-dur="4">Eighth</button>
+  </div>
+  <div class="row">
+    <label>Accidental</label>
+    <button data-alt="0">♮</button>
+    <button data-alt="1">♯</button>
+    <button data-alt="-1">♭</button>
+  </div>
+  <div class="row">
+    <label>Octave</label>
+    <button id="octDown">-</button>
+    <span id="octVal">4</span>
+    <button id="octUp">+</button>
+  </div>
+  <div class="row">
+    <label>Notes</label>
+    <button class="n">C</button><button class="n">D</button><button class="n">E</button>
+    <button class="n">F</button><button class="n">G</button><button class="n">A</button><button class="n">B</button>
+    <button id="rest">Rest</button>
+  </div>
+  <div class="row">
+    <button id="newMeas">New measure</button>
+    <button id="undo">Undo</button>
+    <button id="clear">Clear</button>
+  </div>
+</div>
+
+<div id="score"></div>
+
 <script src="https://cdn.jsdelivr.net/npm/opensheetmusicdisplay/build/opensheetmusicdisplay.min.js"></script>
 <script>
-const xml=`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
-<score-partwise version="3.1">
- <part-list><score-part id="P1"><part-name>Guitar</part-name></score-part></part-list>
- <part id="P1">
-  <measure number="1">
-   <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time>
-   <clef><sign>G</sign><line>2</line></clef></attributes>
-   <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-   <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-   <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-   <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
-  </measure>
- </part>
-</score-partwise>`;
-const el=document.getElementById('score');
-const osmd=new opensheetmusicdisplay.OpenSheetMusicDisplay(el,{backend:"svg",drawTitle:false});
-osmd.load(xml).then(()=>osmd.render());
+// ---- minimal state ----
+const beats=4, beatType=4, divisions=8; // quarter=8, eighth=4, half=16, whole=32
+const MEASURE_MAX = beats * (divisions * 4/beatType); // 32
+let measures = [[]];                      // [{step:'C', alter:0, oct:4, dur:8, rest:false}, ...]
+let curDur=8, curAlt=0, curOct=4;
+
+const el = document.getElementById('score');
+const osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay(el,{backend:"svg",drawTitle:false});
+
+function measTime(m){return m.reduce((s,n)=>s+n.dur,0)}
+function pushMeasure(){measures.push([])}
+function addNote(obj){
+  let m = measures[measures.length-1];
+  if(measTime(m)+obj.dur > MEASURE_MAX){ pushMeasure(); m = measures[measures.length-1]; }
+  m.push(obj); render();
+}
+function undo(){
+  let m = measures[measures.length-1];
+  if(m.length) m.pop(); else if(measures.length>1){ measures.pop(); }
+  render();
+}
+function clearAll(){ measures=[[]]; render(); }
+
+function noteXml(n){
+  if(n.rest) return `<note><rest/><duration>${n.dur}</duration><type>${typeOf(n.dur)}</type></note>`;
+  const alter = n.alter ? `<alter>${n.alter}</alter>` : '';
+  return `<note>
+    <pitch><step>${n.step}</step>${alter?alter:''}<octave>${n.oct}</octave></pitch>
+    <duration>${n.dur}</duration><type>${typeOf(n.dur)}</type>
+  </note>`;
+}
+function typeOf(dur){ // divisions=8 per quarter
+  switch(dur){
+    case 32: return 'whole';
+    case 16: return 'half';
+    case 8:  return 'quarter';
+    case 4:  return 'eighth';
+    default: return 'quarter';
+  }
+}
+function buildXml(){
+  const attrs = `<attributes>
+    <divisions>${divisions}</divisions>
+    <time><beats>${beats}</beats><beat-type>${beatType}</beat-type></time>
+    <clef><sign>G</sign><line>2</line></clef>
+  </attributes>`;
+  const ms = measures.map((m,i)=>`<measure number="${i+1}">${i===0?attrs:''}${m.map(noteXml).join('')}</measure>`).join('');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+  <score-partwise version="3.1">
+    <part-list><score-part id="P1"><part-name>Guitar</part-name></score-part></part-list>
+    <part id="P1">${ms}</part>
+  </score-partwise>`;
+}
+async function render(){ await osmd.load(buildXml()); osmd.render(); }
+
+// ---- UI wiring ----
+document.querySelectorAll('[data-dur]').forEach(b=>b.onclick=()=>{curDur=+b.dataset.dur});
+document.querySelectorAll('[data-alt]').forEach(b=>b.onclick=()=>{curAlt=+b.dataset.alt});
+document.getElementById('octUp').onclick=()=>{curOct=Math.min(7,curOct+1);document.getElementById('octVal').textContent=curOct};
+document.getElementById('octDown').onclick=()=>{curOct=Math.max(2,curOct-1);document.getElementById('octVal').textContent=curOct};
+document.querySelectorAll('.n').forEach(b=>b.onclick=()=>addNote({step:b.textContent,alter:curAlt,oct:curOct,dur:curDur,rest:false}));
+document.getElementById('rest').onclick=()=>addNote({rest:true,dur:curDur});
+document.getElementById('newMeas').onclick=()=>{pushMeasure();render()};
+document.getElementById('undo').onclick=undo;
+document.getElementById('clear').onclick=clearAll;
+
+// initial render
+render();
 </script>

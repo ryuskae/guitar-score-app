@@ -1,116 +1,91 @@
 <!doctype html><meta charset="utf-8"><title>Score Prototype</title>
 <style>
-body{font:16px/1.4 system-ui,apple-system,sans-serif;max-width:980px;margin:24px auto;padding:0 12px}
-#ui{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
-#ui > *{padding:6px 10px;border:1px solid #ccc;border-radius:6px;background:#f7f7f7}
-button{cursor:pointer}
-label{border:none;background:none;padding:0;margin-right:6px}
-.row{width:100%;display:flex;gap:8px;align-items:center}
+#ui{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+#ui button{padding:6px 10px;border:1px solid #ccc;border-radius:6px;background:#f7f7f7;cursor:pointer;font-size:20px}
 </style>
 
 <div id="ui">
-  <div class="row">
-    <label>Duration</label>
-    <button data-dur="32">Whole</button>
-    <button data-dur="16">Half</button>
-    <button data-dur="8">Quarter</button>
-    <button data-dur="4">Eighth</button>
-  </div>
-  <div class="row">
-    <label>Accidental</label>
-    <button data-alt="0">♮</button>
-    <button data-alt="1">♯</button>
-    <button data-alt="-1">♭</button>
-  </div>
-  <div class="row">
-    <label>Octave</label>
-    <button id="octDown">-</button>
-    <span id="octVal">4</span>
-    <button id="octUp">+</button>
-  </div>
-  <div class="row">
-    <label>Notes</label>
-    <button class="n">C</button><button class="n">D</button><button class="n">E</button>
-    <button class="n">F</button><button class="n">G</button><button class="n">A</button><button class="n">B</button>
-    <button id="rest">Rest</button>
-  </div>
-  <div class="row">
-    <button id="newMeas">New measure</button>
-    <button id="undo">Undo</button>
-    <button id="clear">Clear</button>
-  </div>
+  <button data-dur="32">○</button>
+  <button data-dur="16">𝅗𝅥</button>
+  <button data-dur="8">♩</button>
+  <button data-dur="4">♪</button>
+  <button data-dur="2">𝅘𝅥𝅯</button>
+  <button data-dur="1">𝅘𝅥𝅰</button>
 </div>
-
 <div id="score"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/opensheetmusicdisplay/build/opensheetmusicdisplay.min.js"></script>
 <script>
-// ---- minimal state ----
-const beats=4, beatType=4, divisions=8; // quarter=8, eighth=4, half=16, whole=32
-const MEASURE_MAX = beats * (divisions * 4/beatType); // 32
-let measures = [[]];                      // [{step:'C', alter:0, oct:4, dur:8, rest:false}, ...]
-let curDur=8, curAlt=0, curOct=4;
+// ----- state -----
+const beats=4, beatType=4, divisions=8; 
+const MEASURE_MAX=beats*(divisions*4/beatType); 
+let measures=[[]];
+let curDur=8, curDot=false;
 
-const el = document.getElementById('score');
-const osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay(el,{backend:"svg",drawTitle:false});
+const el=document.getElementById('score');
+const osmd=new opensheetmusicdisplay.OpenSheetMusicDisplay(el,{backend:"svg",drawTitle:false});
 
+// ----- helpers -----
 function measTime(m){return m.reduce((s,n)=>s+n.dur,0)}
 function pushMeasure(){measures.push([])}
-function addNote(obj){
-  let m = measures[measures.length-1];
-  if(measTime(m)+obj.dur > MEASURE_MAX){ pushMeasure(); m = measures[measures.length-1]; }
-  m.push(obj); render();
-}
-function undo(){
-  let m = measures[measures.length-1];
-  if(m.length) m.pop(); else if(measures.length>1){ measures.pop(); }
+function addNote(step){
+  let m=measures[measures.length-1];
+  let dur=curDur;
+  if(curDot) dur += curDur/2; // dotted
+  if(measTime(m)+dur>MEASURE_MAX){pushMeasure(); m=measures[measures.length-1];}
+  m.push({step,oct:4,dur,rest:!step});
+  curDot=false;
   render();
 }
-function clearAll(){ measures=[[]]; render(); }
-
-function noteXml(n){
-  if(n.rest) return `<note><rest/><duration>${n.dur}</duration><type>${typeOf(n.dur)}</type></note>`;
-  const alter = n.alter ? `<alter>${n.alter}</alter>` : '';
-  return `<note>
-    <pitch><step>${n.step}</step>${alter?alter:''}<octave>${n.oct}</octave></pitch>
-    <duration>${n.dur}</duration><type>${typeOf(n.dur)}</type>
-  </note>`;
-}
-function typeOf(dur){ // divisions=8 per quarter
-  switch(dur){
+function typeOf(d){
+  if(d===48) return "dotted-half";
+  switch(d){
     case 32: return 'whole';
     case 16: return 'half';
-    case 8:  return 'quarter';
-    case 4:  return 'eighth';
+    case 8: return 'quarter';
+    case 4: return 'eighth';
+    case 2: return '16th';
+    case 1: return '32nd';
+    case 12: return 'dotted-quarter';
+    case 24: return 'dotted-half';
     default: return 'quarter';
   }
 }
+function noteXml(n){
+  if(n.rest) return `<note><rest/><duration>${n.dur}</duration><type>${typeOf(n.dur)}</type></note>`;
+  return `<note>
+    <pitch><step>${n.step}</step><octave>${n.oct}</octave></pitch>
+    <duration>${n.dur}</duration><type>${typeOf(n.dur)}</type>
+  </note>`;
+}
 function buildXml(){
-  const attrs = `<attributes>
+  const attrs=`<attributes>
     <divisions>${divisions}</divisions>
     <time><beats>${beats}</beats><beat-type>${beatType}</beat-type></time>
     <clef><sign>G</sign><line>2</line></clef>
   </attributes>`;
-  const ms = measures.map((m,i)=>`<measure number="${i+1}">${i===0?attrs:''}${m.map(noteXml).join('')}</measure>`).join('');
+  const ms=measures.map((m,i)=>`<measure number="${i+1}">${i===0?attrs:''}${m.map(noteXml).join('')}</measure>`).join('');
   return `<?xml version="1.0" encoding="UTF-8"?>
   <score-partwise version="3.1">
     <part-list><score-part id="P1"><part-name>Guitar</part-name></score-part></part-list>
     <part id="P1">${ms}</part>
   </score-partwise>`;
 }
-async function render(){ await osmd.load(buildXml()); osmd.render(); }
+async function render(){await osmd.load(buildXml()); osmd.render();}
 
-// ---- UI wiring ----
-document.querySelectorAll('[data-dur]').forEach(b=>b.onclick=()=>{curDur=+b.dataset.dur});
-document.querySelectorAll('[data-alt]').forEach(b=>b.onclick=()=>{curAlt=+b.dataset.alt});
-document.getElementById('octUp').onclick=()=>{curOct=Math.min(7,curOct+1);document.getElementById('octVal').textContent=curOct};
-document.getElementById('octDown').onclick=()=>{curOct=Math.max(2,curOct-1);document.getElementById('octVal').textContent=curOct};
-document.querySelectorAll('.n').forEach(b=>b.onclick=()=>addNote({step:b.textContent,alter:curAlt,oct:curOct,dur:curDur,rest:false}));
-document.getElementById('rest').onclick=()=>addNote({rest:true,dur:curDur});
-document.getElementById('newMeas').onclick=()=>{pushMeasure();render()};
-document.getElementById('undo').onclick=undo;
-document.getElementById('clear').onclick=clearAll;
+// ----- UI events -----
+document.querySelectorAll('#ui button').forEach(b=>b.onclick=()=>{curDur=+b.dataset.dur;curDot=false;});
 
-// initial render
+// Keyboard input
+document.addEventListener('keydown',e=>{
+  const key=e.key.toLowerCase();
+  if("cdefgab".includes(key)){ addNote(key.toUpperCase()); }
+  else if("123456".includes(key)){
+    const map={1:32,2:16,3:8,4:4,5:2,6:1};
+    curDur=map[key]; curDot=false;
+  }
+  else if(key==="."){ curDot=true; }
+});
+
 render();
 </script>

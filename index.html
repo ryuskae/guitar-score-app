@@ -1,91 +1,73 @@
-<!doctype html><meta charset="utf-8"><title>Score Prototype</title>
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Guitar Score</title>
 <style>
-#ui{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
-#ui button{padding:6px 10px;border:1px solid #ccc;border-radius:6px;background:#f7f7f7;cursor:pointer;font-size:20px}
+  :root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#1f2937;background:#f3f4f6}
+  *{box-sizing:border-box} body{margin:0;min-width:320px}.app{max-width:1180px;margin:auto;padding:28px 22px 46px}
+  header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px}h1{font-size:25px;margin:0;letter-spacing:-.5px}.subtitle{margin:5px 0 0;color:#6b7280;font-size:14px}
+  .badge{font-size:12px;color:#166534;background:#dcfce7;border:1px solid #bbf7d0;padding:5px 9px;border-radius:99px;white-space:nowrap}
+  .toolbar,.tab-editor{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:15px;box-shadow:0 1px 2px #1118270a}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:16px}
+  .group{display:flex;align-items:center;gap:5px;padding-right:10px;border-right:1px solid #e5e7eb}.group:last-of-type{border:0}.label{font-size:12px;font-weight:700;color:#6b7280;margin-right:3px}
+  button{font:inherit;border:1px solid #d1d5db;border-radius:7px;background:#fff;color:#374151;padding:7px 10px;cursor:pointer}button:hover{border-color:#6366f1;color:#4338ca}button.active{color:#fff;background:#4f46e5;border-color:#4f46e5}button.danger:hover{border-color:#ef4444;color:#dc2626}
+  .hint{margin-left:auto;font-size:13px;color:#6b7280}.keyboard{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f3f4f6;padding:2px 5px;border-radius:4px;color:#374151}
+  .sheet{min-height:370px;padding:26px 20px;background:#fff;border:1px solid #e5e7eb;border-radius:12px;overflow-x:auto;box-shadow:0 1px 2px #1118270a}.empty{color:#9ca3af;text-align:center;padding:130px 0}.sheet svg{max-width:none}
+  .tab-editor{margin-top:16px}.tab-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.tab-head h2{font-size:16px;margin:0}.selection{font-size:13px;color:#4f46e5;font-weight:650}
+  .tab-scroll{overflow-x:auto;padding:4px 0}.tab{border-collapse:collapse;min-width:680px;width:100%;table-layout:fixed;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.tab th{width:105px;text-align:right;color:#6b7280;font-size:12px;font-weight:600;padding-right:12px}.tab td{height:34px;border-bottom:1px solid #64748b;position:relative;text-align:center;color:#111827;font-size:15px;cursor:pointer}.tab td:first-of-type{border-left:1px solid #64748b}.tab td:last-child{border-right:1px solid #64748b}.tab td.note::after{content:"";position:absolute;background:#fff;border:1px solid #c7d2fe;border-radius:4px;inset:2px 5px;z-index:0}.tab td span{position:relative;z-index:1}.tab td.selected::after{background:#e0e7ff;border-color:#6366f1;box-shadow:0 0 0 1px #6366f1}.tab td:hover::after{background:#f5f3ff}.tab td.blank{cursor:default}
+  .fret-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:15px;padding-top:14px;border-top:1px solid #e5e7eb}.fret-controls .label{margin-right:5px}.string-buttons button{min-width:38px;padding:6px}.fret-input{width:61px;padding:7px;border:1px solid #d1d5db;border-radius:7px;font:inherit}.warning{margin:10px 0 0;font-size:12px;color:#b45309;min-height:18px}
+  @media(max-width:680px){.app{padding:18px 12px 32px}header{align-items:flex-start}.hint{width:100%;margin-left:0}.toolbar{gap:8px}.group{padding-right:7px}.sheet{padding:16px 7px}.subtitle{font-size:13px}}
 </style>
-
-<div id="ui">
-  <button data-dur="32">○</button>
-  <button data-dur="16">𝅗𝅥</button>
-  <button data-dur="8">♩</button>
-  <button data-dur="4">♪</button>
-  <button data-dur="2">𝅘𝅥𝅯</button>
-  <button data-dur="1">𝅘𝅥𝅰</button>
-</div>
-<div id="score"></div>
-
+<body>
+<main class="app">
+  <header><div><h1>Guitar Score</h1><p class="subtitle">오선보와 타브 악보를 함께 편집합니다.</p></div><div class="badge">TAB 연동</div></header>
+  <section class="toolbar" aria-label="악보 도구">
+    <div class="group"><span class="label">음가</span><button data-dur="32">온음표</button><button data-dur="16">2분</button><button class="active" data-dur="8">4분</button><button data-dur="4">8분</button><button data-dur="2">16분</button></div>
+    <div class="group"><span class="label">조작</span><button id="rest">쉼표</button><button id="undo">되돌리기</button><button id="clear" class="danger">전체 지우기</button></div>
+    <div class="hint"><span class="keyboard">C D E F G A B</span> 음표 입력 · <span class="keyboard">1–5</span> 음가 선택</div>
+  </section>
+  <section class="sheet"><div id="score"><div class="empty">키보드의 C–B를 눌러 첫 음표를 입력하세요.</div></div></section>
+  <section class="tab-editor">
+    <div class="tab-head"><h2>Guitar TAB</h2><span id="selection" class="selection">편집할 음표를 선택하세요.</span></div>
+    <div class="tab-scroll"><table class="tab"><tbody id="tab-body"></tbody></table></div>
+    <div class="fret-controls" id="fret-controls" hidden>
+      <span class="label">선택한 음표의 줄</span><span id="string-buttons" class="string-buttons"></span>
+      <span class="label">프렛</span><input id="fret" class="fret-input" type="number" min="0" max="24" inputmode="numeric">
+      <button id="apply-fret">적용</button>
+    </div>
+    <p id="warning" class="warning"></p>
+  </section>
+</main>
 <script src="https://cdn.jsdelivr.net/npm/opensheetmusicdisplay/build/opensheetmusicdisplay.min.js"></script>
 <script>
-// ----- state -----
-const beats=4, beatType=4, divisions=8; 
-const MEASURE_MAX=beats*(divisions*4/beatType); 
-let measures=[[]];
-let curDur=8, curDot=false;
+// A note owns both its written pitch (MIDI) and its guitar position (string/fret).
+// Updating either side always rebuilds the other display from this single source of truth.
+const beats=4, beatType=4, divisions=8, MEASURE_MAX=32;
+const tuning=[64,59,55,50,45,40]; // string 1(E4) to 6(E2), MIDI
+const stringNames=['1 · E','2 · B','3 · G','4 · D','5 · A','6 · E'];
+let notes=[], curDur=8, selected=null, osmd;
+const score=document.getElementById('score'), tabBody=document.getElementById('tab-body');
 
-const el=document.getElementById('score');
-const osmd=new opensheetmusicdisplay.OpenSheetMusicDisplay(el,{backend:"svg",drawTitle:false});
-
-// ----- helpers -----
-function measTime(m){return m.reduce((s,n)=>s+n.dur,0)}
-function pushMeasure(){measures.push([])}
-function addNote(step){
-  let m=measures[measures.length-1];
-  let dur=curDur;
-  if(curDot) dur += curDur/2; // dotted
-  if(measTime(m)+dur>MEASURE_MAX){pushMeasure(); m=measures[measures.length-1];}
-  m.push({step,oct:4,dur,rest:!step});
-  curDot=false;
-  render();
+function midiToPitch(midi){const names=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];return {name:names[(midi%12+12)%12],oct:Math.floor(midi/12)-1}}
+function pitchXml(midi){const p=midiToPitch(midi), step=p.name[0], alter=p.name.length===2?'<alter>1</alter>':'';return `<pitch><step>${step}</step>${alter}<octave>${p.oct}</octave></pitch>`}
+function typeOf(d){return ({32:'whole',16:'half',8:'quarter',4:'eighth',2:'16th'})[d]||'quarter'}
+function bestPosition(midi){
+  // Prefer the lowest playable fret, then a central string. This is a usable default;
+  // the TAB editor below deliberately lets the player choose any valid alternative.
+  return tuning.map((open,string)=>({string,fret:midi-open})).filter(p=>p.fret>=0&&p.fret<=24).sort((a,b)=>a.fret-b.fret||Math.abs(a.string-2)-Math.abs(b.string-2))[0]||null;
 }
-function typeOf(d){
-  if(d===48) return "dotted-half";
-  switch(d){
-    case 32: return 'whole';
-    case 16: return 'half';
-    case 8: return 'quarter';
-    case 4: return 'eighth';
-    case 2: return '16th';
-    case 1: return '32nd';
-    case 12: return 'dotted-quarter';
-    case 24: return 'dotted-half';
-    default: return 'quarter';
-  }
-}
-function noteXml(n){
-  if(n.rest) return `<note><rest/><duration>${n.dur}</duration><type>${typeOf(n.dur)}</type></note>`;
-  return `<note>
-    <pitch><step>${n.step}</step><octave>${n.oct}</octave></pitch>
-    <duration>${n.dur}</duration><type>${typeOf(n.dur)}</type>
-  </note>`;
-}
-function buildXml(){
-  const attrs=`<attributes>
-    <divisions>${divisions}</divisions>
-    <time><beats>${beats}</beats><beat-type>${beatType}</beat-type></time>
-    <clef><sign>G</sign><line>2</line></clef>
-  </attributes>`;
-  const ms=measures.map((m,i)=>`<measure number="${i+1}">${i===0?attrs:''}${m.map(noteXml).join('')}</measure>`).join('');
-  return `<?xml version="1.0" encoding="UTF-8"?>
-  <score-partwise version="3.1">
-    <part-list><score-part id="P1"><part-name>Guitar</part-name></score-part></part-list>
-    <part id="P1">${ms}</part>
-  </score-partwise>`;
-}
-async function render(){await osmd.load(buildXml()); osmd.render();}
-
-// ----- UI events -----
-document.querySelectorAll('#ui button').forEach(b=>b.onclick=()=>{curDur=+b.dataset.dur;curDot=false;});
-
-// Keyboard input
-document.addEventListener('keydown',e=>{
-  const key=e.key.toLowerCase();
-  if("cdefgab".includes(key)){ addNote(key.toUpperCase()); }
-  else if("123456".includes(key)){
-    const map={1:32,2:16,3:8,4:4,5:2,6:1};
-    curDur=map[key]; curDot=false;
-  }
-  else if(key==="."){ curDot=true; }
-});
-
+function addNote(letter){const semitones={C:0,D:2,E:4,F:5,G:7,A:9,B:11};const midi=60+semitones[letter];const pos=bestPosition(midi);notes.push({midi,dur:curDur,rest:false,string:pos?.string??null,fret:pos?.fret??null});selected=notes.length-1;render()}
+function addRest(){notes.push({dur:curDur,rest:true});selected=notes.length-1;render()}
+function xmlNote(n){if(n.rest)return `<note><rest/><duration>${n.dur}</duration><type>${typeOf(n.dur)}</type></note>`;const technical=n.string===null?'':`<notations><technical><string>${n.string+1}</string><fret>${n.fret}</fret></technical></notations>`;return `<note>${pitchXml(n.midi)}<duration>${n.dur}</duration><type>${typeOf(n.dur)}</type>${technical}</note>`}
+function buildXml(){let time=0, measure=1, blocks=[''];notes.forEach(n=>{if(time+n.dur>MEASURE_MAX){blocks.push('');time=0;measure++}blocks[blocks.length-1]+=xmlNote(n);time+=n.dur});const attrs=`<attributes><divisions>${divisions}</divisions><time><beats>${beats}</beats><beat-type>${beatType}</beat-type></time><staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>TAB</sign><line>5</line></clef></attributes>`;const ms=blocks.map((b,i)=>`<measure number="${i+1}">${i===0?attrs:''}${b}</measure>`).join('');return `<?xml version="1.0" encoding="UTF-8"?><score-partwise version="3.1"><part-list><score-part id="P1"><part-name>Classical Guitar</part-name><score-instrument id="P1-I1"><instrument-name>Classical Guitar</instrument-name></score-instrument></score-part></part-list><part id="P1">${ms}</part></score-partwise>`}
+async function renderScore(){if(!notes.length){score.innerHTML='<div class="empty">키보드의 C–B를 눌러 첫 음표를 입력하세요.</div>';return}try{if(!osmd)osmd=new opensheetmusicdisplay.OpenSheetMusicDisplay(score,{backend:'svg',drawTitle:false,drawPartNames:false,autoResize:true,renderSingleHorizontalStaffline:false});await osmd.load(buildXml());osmd.render()}catch(error){score.innerHTML='<div class="empty">악보를 그리는 중 문제가 생겼습니다.</div>';console.error(error)}}
+function renderTab(){tabBody.innerHTML='';const playable=notes.map((n,i)=>!n.rest?{...n,i}:null);for(let s=0;s<6;s++){const row=document.createElement('tr');row.innerHTML=`<th>${stringNames[s]}</th>`;playable.forEach((n,i)=>{const cell=document.createElement('td');if(!n){cell.className='blank';return row.append(cell)}if(n.string===s){cell.className='note'+(selected===n.i?' selected':'');cell.innerHTML=`<span>${n.fret}</span>`}cell.title=`음표 ${i+1} 선택`;cell.onclick=()=>{selected=n.i;renderTab();renderControls()};row.append(cell)});tabBody.append(row)}document.getElementById('selection').textContent=selected!==null&&notes[selected]&&!notes[selected].rest?`음표 ${selected+1} 선택됨`:'편집할 음표를 선택하세요.'}
+function renderControls(){const n=notes[selected], controls=document.getElementById('fret-controls'), warning=document.getElementById('warning');if(!n||n.rest){controls.hidden=true;warning.textContent='';return}controls.hidden=false;document.getElementById('fret').value=n.fret;document.getElementById('string-buttons').innerHTML=tuning.map((_,s)=>`<button data-string="${s}" class="${n.string===s?'active':''}">${s+1}</button>`).join('');document.querySelectorAll('[data-string]').forEach(b=>b.onclick=()=>setString(+b.dataset.string));warning.textContent=''}
+function setString(string){const n=notes[selected];const fret=n.midi-tuning[string];if(fret<0||fret>24){document.getElementById('warning').textContent=`${string+1}번 줄에서는 이 음을 0–24프렛으로 연주할 수 없습니다.`;return}n.string=string;n.fret=fret;render()}
+function applyFret(){const n=notes[selected], fret=Number(document.getElementById('fret').value);if(!Number.isInteger(fret)||fret<0||fret>24){document.getElementById('warning').textContent='프렛은 0에서 24 사이의 정수여야 합니다.';return}n.fret=fret;n.midi=tuning[n.string]+fret;render()}
+function render(){renderScore();renderTab();renderControls()}
+document.querySelectorAll('[data-dur]').forEach(b=>b.onclick=()=>{curDur=+b.dataset.dur;document.querySelectorAll('[data-dur]').forEach(x=>x.classList.toggle('active',x===b))});
+document.getElementById('rest').onclick=addRest;document.getElementById('undo').onclick=()=>{notes.pop();selected=notes.length?notes.length-1:null;render()};document.getElementById('clear').onclick=()=>{if(notes.length&&confirm('입력한 모든 음표를 지울까요?')){notes=[];selected=null;render()}};document.getElementById('apply-fret').onclick=applyFret;
+document.addEventListener('keydown',e=>{const key=e.key.toUpperCase();if(e.target.matches('input'))return;if('CDEFGAB'.includes(key)){e.preventDefault();addNote(key)}else if('12345'.includes(e.key)){document.querySelector(`[data-dur="${({1:32,2:16,3:8,4:4,5:2})[e.key]}"]`).click()}else if(e.key==='Backspace'){e.preventDefault();document.getElementById('undo').click()}else if(e.key==='R'){addRest()}});
 render();
 </script>

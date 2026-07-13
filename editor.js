@@ -8,6 +8,9 @@ const $ = (s) => document.querySelector(s);
 const scoreSvg = $('#score');
 const sheet = $('#sheet');
 const status = $('#status');
+const TAB_LINE_GAP = 12;
+const TAB_HEIGHT = TAB_LINE_GAP * 5;
+const TAB_VOICE_OFFSET = [0, 7, -7, 13];
 let score = createScore();
 let duration = 8;
 let dotted = false;
@@ -111,23 +114,27 @@ function drawNote(note, measure, measureIndex, voice, x, staffY, tabY, group) {
     drawLedgerLines(x, y, staffY, g);
     if (SHARP_PITCH_CLASSES.has(((writtenMidi(note.midi)%12)+12)%12)) svg('text', { x:x-14, y:y+4, text:'♯', 'font-size':14, 'font-family':'serif' }, g);
     const scale = note.grace ? .7 : 1;
+    const stemUp = voice % 2 === 0;
+    const stemX = x + (stemUp ? 5 : -5) * scale;
+    const stemEndY = y + (stemUp ? -27 : 27) * scale;
     svg('ellipse', { cx:x, cy:y, rx:6*scale, ry:4.3*scale, transform:`rotate(-18 ${x} ${y})`, class:'notehead' }, g);
-    if (note.duration < 32) svg('line', { x1:x+5*scale, y1:y, x2:x+5*scale, y2:y-27*scale, class:'stem' }, g);
-    if (note.duration <= 4) svg('path', { d:`M${x+5},${y-27} q11,6 2,15`, fill:'none', class:'stem' }, g);
-    if (note.duration <= 2) svg('path', { d:`M${x+5},${y-20} q11,6 2,15`, fill:'none', class:'stem' }, g);
+    if (note.duration < 32) svg('line', { x1:stemX, y1:y, x2:stemX, y2:stemEndY, class:'stem' }, g);
+    if (note.duration <= 4) svg('path', { d:stemUp?`M${stemX},${stemEndY} q11,6 2,15`:`M${stemX},${stemEndY} q-11,-6 -2,-15`, fill:'none', class:'stem' }, g);
+    if (note.duration <= 2) svg('path', { d:stemUp?`M${stemX},${stemEndY+7} q11,6 2,15`:`M${stemX},${stemEndY-7} q-11,-6 -2,-15`, fill:'none', class:'stem' }, g);
     if (note.dotted) svg('circle', { cx:x+10, cy:y, r:1.8, class:'notehead' }, g);
   }
   svg('rect', { x:x-13, y:staffY-2, width:26, height:58, class:'hit' }, g)
     .addEventListener('click', (e) => { e.stopPropagation(); setSelection(measureIndex, voice, note.id, e.shiftKey); });
 
   if (!note.rest && score.instrument !== 'piano') {
-    const tg = svg('g', { class:selected ? 'selected' : '', 'data-tab-note-id':note.id }, group);
-    const ty = tabY + (note.string - 1) * 9;
+    const tabX = x + TAB_VOICE_OFFSET[voice];
+    const tg = svg('g', { class:`tab-voice-${voice} ${selected?'selected':''} ${inactive?'inactive-voice':''}`, 'data-tab-note-id':note.id }, group);
+    const ty = tabY + (note.string - 1) * TAB_LINE_GAP;
     const label = String(note.fret);
     const width = Math.max(14, label.length * 9 + 5);
-    svg('rect', { x:x-width/2, y:ty-8, width, height:16, rx:1, class:'tab-bg' }, tg);
-    svg('text', { x, y:ty+.5, class:'tab-number', text:label }, tg);
-    svg('rect', { x:x-13, y:ty-11, width:26, height:22, class:'hit' }, tg)
+    svg('rect', { x:tabX-width/2, y:ty-8, width, height:16, rx:1, class:'tab-bg' }, tg);
+    svg('text', { x:tabX, y:ty+.5, class:'tab-number', text:label }, tg);
+    svg('rect', { x:tabX-13, y:ty-11, width:26, height:22, class:'hit' }, tg)
       .addEventListener('click', (e) => { e.stopPropagation(); setSelection(measureIndex, voice, note.id, e.shiftKey); });
   }
 }
@@ -141,7 +148,8 @@ function endpointFor(ref, layouts) {
   const tick = notePosition(note, measure, ref.voice);
   return {
     x: layout.x + layout.noteLeft + (tick / MEASURE_TICKS) * layout.noteWidth,
-    noteY: pitchY(note.midi, layout.staffY), tabNoteY:layout.tabY+(note.string-1)*9,
+    noteY: pitchY(note.midi, layout.staffY), tabX:layout.x+layout.noteLeft+(tick/MEASURE_TICKS)*layout.noteWidth+TAB_VOICE_OFFSET[ref.voice],
+    tabNoteY:layout.tabY+(note.string-1)*TAB_LINE_GAP,
     staffY:layout.staffY, tabY:layout.tabY, system:layout.system,
   };
 }
@@ -169,13 +177,16 @@ function drawAnnotations(layouts) {
         }
       };
       if (a.system === b.system) {
-        const y1 = a.noteY + (ann.type === 'slur' ? -7 : 7);
-        const y2 = b.noteY + (ann.type === 'slur' ? -7 : 7);
-        const control = ann.type === 'slur' ? Math.min(y1,y2)-rise : Math.max(y1,y2)+rise;
+        const slurBelow = ann.type === 'slur' && ann.start.voice % 2 === 0;
+        const below = slurBelow || ann.type === 'tie';
+        const y1 = a.noteY + (below ? 8 : -8);
+        const y2 = b.noteY + (below ? 8 : -8);
+        const control = below ? Math.max(y1,y2)+rise : Math.min(y1,y2)-rise;
         curve(a.x, y1, b.x, y2, control);
         if (ann.type === 'slur' && score.instrument !== 'piano') {
-          const ty1=a.tabNoteY-9, ty2=b.tabNoteY-9;
-          curve(a.x, ty1, b.x, ty2, Math.min(ty1,ty2)-13);
+          const ty1=a.tabNoteY+(slurBelow?10:-10), ty2=b.tabNoteY+(slurBelow?10:-10);
+          const tabControl=slurBelow?Math.max(ty1,ty2)+13:Math.min(ty1,ty2)-13;
+          curve(a.tabX, ty1, b.tabX, ty2, tabControl);
         }
       }
       else {
@@ -207,7 +218,7 @@ function render() {
   sheet.dataset.page = score.page;
   const width = score.page === 'Screen' ? 1100 : score.page === 'A3' ? 1000 : 720;
   const sys = systems();
-  const systemHeight = 190, top = 28;
+  const systemHeight = 210, top = 28;
   scoreSvg.setAttribute('viewBox', `0 0 ${width} ${Math.max(220, top + sys.length * systemHeight)}`);
   scoreSvg.style.height = `${Math.max(220, top + sys.length * systemHeight)}px`;
   const layouts = new Map();
@@ -220,22 +231,22 @@ function render() {
     const piano = score.instrument === 'piano';
     svg('text', { x:left+(piano?6:5), y:tabY+(piano?29:27), text:piano?'𝄢':'TAB', 'font-size':piano?36:11, 'font-family':'serif', 'font-weight':700 });
     for (let line = 0; line < 5; line++) svg('line', { x1:left, y1:staffY+line*8, x2:left+usable, y2:staffY+line*8, class:'staff-line' });
-    for (let line = 0; line < (piano?5:6); line++) svg('line', { x1:left, y1:tabY+line*(piano?8:9), x2:left+usable, y2:tabY+line*(piano?8:9), class:piano?'staff-line':'tab-line' });
+    for (let line = 0; line < (piano?5:6); line++) svg('line', { x1:left, y1:tabY+line*(piano?8:TAB_LINE_GAP), x2:left+usable, y2:tabY+line*(piano?8:TAB_LINE_GAP), class:piano?'staff-line':'tab-line' });
     items.forEach(({ measure, index }, localIndex) => {
       const x = left + localIndex * measureWidth;
       const noteLeft = localIndex === 0 ? 58 : 25;
       const noteWidth = measureWidth - noteLeft - 14;
       layouts.set(index, { x, width:measureWidth, noteLeft, noteWidth, staffY, tabY, system:systemIndex });
-      if (score.selection.measure === index && !score.selection.noteId) svg('rect', { x, y:staffY-7, width:measureWidth, height:tabY+53-staffY, class:'selected-measure' });
-      svg('rect', { x, y:staffY-9, width:measureWidth, height:tabY+58-staffY, class:'measure-hit' })
+      if (score.selection.measure === index && !score.selection.noteId) svg('rect', { x, y:staffY-7, width:measureWidth, height:tabY+TAB_HEIGHT+8-staffY, class:'selected-measure' });
+      svg('rect', { x, y:staffY-9, width:measureWidth, height:tabY+TAB_HEIGHT+13-staffY, class:'measure-hit' })
         .addEventListener('click', (e) => { e.stopPropagation(); setSelection(index, score.activeVoice, null, e.shiftKey); });
       svg('line', { x1:x, y1:staffY, x2:x, y2:staffY+32, class:'barline' });
-      svg('line', { x1:x, y1:tabY, x2:x, y2:tabY+(piano?32:45), class:'barline' });
+      svg('line', { x1:x, y1:tabY, x2:x, y2:tabY+(piano?32:TAB_HEIGHT), class:'barline' });
       svg('text', { x:x+5, y:staffY-5, text:String(index+1), 'font-size':9, fill:'#65718a' });
       for (let voice = 0; voice < measure.voices.length; voice++) {
         measure.voices[voice].forEach((note) => {
           const tick = notePosition(note, measure, voice);
-          const nx = x + noteLeft + (tick / MEASURE_TICKS) * noteWidth + voice * 2;
+          const nx = x + noteLeft + (tick / MEASURE_TICKS) * noteWidth;
           drawNote(note, measure, index, voice, nx, staffY, tabY, scoreSvg);
         });
       }
@@ -243,7 +254,7 @@ function render() {
     });
     const end = left + usable;
     svg('line', { x1:end, y1:staffY, x2:end, y2:staffY+32, class:'barline' });
-    svg('line', { x1:end, y1:tabY, x2:end, y2:tabY+(piano?32:45), class:'barline' });
+    svg('line', { x1:end, y1:tabY, x2:end, y2:tabY+(piano?32:TAB_HEIGHT), class:'barline' });
   });
   drawAnnotations(layouts);
   const entry = selectedEntry();
@@ -361,6 +372,121 @@ function download(name, content, type) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([content], {type})); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+function bytes(text) { return new TextEncoder().encode(text); }
+
+function joinBytes(chunks) {
+  const result = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
+  let offset = 0;
+  chunks.forEach((chunk) => { result.set(chunk, offset); offset += chunk.length; });
+  return result;
+}
+
+function jpegBytes(dataUrl) {
+  const binary = atob(dataUrl.split(',')[1]);
+  const result = new Uint8Array(binary.length);
+  for (let i=0;i<binary.length;i++) result[i]=binary.charCodeAt(i);
+  return result;
+}
+
+function buildPdf(jpegs, pageWidth, pageHeight, pixelWidth, pixelHeight) {
+  const count = jpegs.length;
+  const objects = new Map();
+  const pageIds = Array.from({length:count}, (_, index) => 3 + index * 3);
+  objects.set(1, [bytes('<< /Type /Catalog /Pages 2 0 R >>')]);
+  objects.set(2, [bytes(`<< /Type /Pages /Count ${count} /Kids [${pageIds.map((id)=>`${id} 0 R`).join(' ')}] >>`)]);
+  jpegs.forEach((jpeg, index) => {
+    const pageId=pageIds[index], contentId=pageId+1, imageId=pageId+2;
+    const stream=`q\n${pageWidth} 0 0 ${pageHeight} 0 0 cm\n/Im0 Do\nQ\n`;
+    objects.set(pageId, [bytes(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /XObject << /Im0 ${imageId} 0 R >> >> /Contents ${contentId} 0 R >>`)]);
+    objects.set(contentId, [bytes(`<< /Length ${bytes(stream).length} >>\nstream\n${stream}endstream`)]);
+    objects.set(imageId, [bytes(`<< /Type /XObject /Subtype /Image /Width ${pixelWidth} /Height ${pixelHeight} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`), jpeg, bytes('\nendstream')]);
+  });
+  const maxId = 2 + count * 3;
+  const chunks=[bytes('%PDF-1.4\n%PDFJS\n')], offsets=Array(maxId+1).fill(0);
+  let length=chunks[0].length;
+  for(let id=1;id<=maxId;id++) {
+    offsets[id]=length;
+    const object=joinBytes([bytes(`${id} 0 obj\n`),...objects.get(id),bytes('\nendobj\n')]);
+    chunks.push(object); length+=object.length;
+  }
+  const xrefOffset=length;
+  let xref=`xref\n0 ${maxId+1}\n0000000000 65535 f \n`;
+  for(let id=1;id<=maxId;id++) xref+=`${String(offsets[id]).padStart(10,'0')} 00000 n \n`;
+  xref+=`trailer\n<< /Size ${maxId+1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  chunks.push(bytes(xref));
+  return joinBytes(chunks);
+}
+
+function scoreImage() {
+  return new Promise((resolve, reject) => {
+    const clone=scoreSvg.cloneNode(true);
+    clone.setAttribute('xmlns', NS);
+    clone.querySelectorAll('.hit,.measure-hit,.selected-measure').forEach((node)=>node.remove());
+    const style=document.createElementNS(NS,'style');
+    style.textContent='.staff-line,.ledger-line,.tab-line,.barline{stroke:#111;stroke-width:1}.notehead{fill:#111!important}.stem{stroke:#111!important;stroke-width:1.3;fill:none}.tab-bg{fill:#fff;stroke:none}.tab-number{fill:#111!important;font:bold 14px Arial;text-anchor:middle;dominant-baseline:middle}.inactive-voice{opacity:1}.slur,.tie{fill:none;stroke:#111;stroke-width:1.5}.barre{fill:none;stroke:#111;stroke-width:1.2;stroke-dasharray:5 4}.annotation-text{font:italic 13px serif}.break-mark{display:none}';
+    clone.prepend(style);
+    const viewBoxValues=clone.getAttribute('viewBox').trim().split(/\s+/).map(Number);
+    const viewBox={width:viewBoxValues[2],height:viewBoxValues[3]};
+    clone.setAttribute('width', viewBox.width); clone.setAttribute('height', viewBox.height);
+    const url=URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(clone)],{type:'image/svg+xml'}));
+    const image=new Image();
+    image.onload=()=>{URL.revokeObjectURL(url);resolve({image,width:viewBox.width,height:viewBox.height});};
+    image.onerror=()=>{URL.revokeObjectURL(url);reject(new Error('악보 이미지를 만들 수 없습니다.'));};
+    image.src=url;
+  });
+}
+
+async function exportPdf() {
+  const preview=window.open('', '_blank');
+  if (preview) preview.document.write('<p style="font-family:sans-serif;padding:24px">PDF를 만드는 중입니다…</p>');
+  try {
+    const sizes={
+      A4:{px:[992,1403],pt:[595.28,841.89]}, A3:{px:[1403,1984],pt:[841.89,1190.55]},
+      Letter:{px:[1020,1320],pt:[612,792]}, Screen:{px:[992,1403],pt:[595.28,841.89]},
+    };
+    const page=sizes[score.page]||sizes.A4;
+    const [canvasWidth,canvasHeight]=page.px;
+    const source=await scoreImage();
+    const margin=Math.round(canvasWidth*.065), contentWidth=canvasWidth-margin*2;
+    const scale=contentWidth/source.width;
+    const hasMetadata=Object.values(score.metadata).some(Boolean);
+    const firstTop=hasMetadata?Math.round(canvasHeight*.12):margin;
+    const normalTop=margin, bottom=margin;
+    const firstCapacity=(canvasHeight-firstTop-bottom)/scale;
+    const normalCapacity=(canvasHeight-normalTop-bottom)/scale;
+    const slices=[];
+    let sourceY=0, first=true;
+    while(sourceY<source.height-.5) {
+      const capacity=first?firstCapacity:normalCapacity;
+      slices.push({sourceY,height:Math.min(capacity,source.height-sourceY),top:first?firstTop:normalTop,first});
+      sourceY+=capacity; first=false;
+    }
+    if(!slices.length) slices.push({sourceY:0,height:source.height,top:firstTop,first:true});
+    const jpegs=[];
+    for(const slice of slices) {
+      const canvas=document.createElement('canvas');canvas.width=canvasWidth;canvas.height=canvasHeight;
+      const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,canvasWidth,canvasHeight);
+      if(slice.first&&hasMetadata) {
+        ctx.fillStyle='#111';ctx.textAlign='center';ctx.font=`bold ${Math.round(canvasWidth*.035)}px serif`;
+        ctx.fillText(score.metadata.title||'',canvasWidth/2,Math.round(canvasHeight*.05));
+        ctx.font=`${Math.round(canvasWidth*.018)}px serif`;
+        ctx.textAlign='left';ctx.fillText(score.metadata.lyricist?`작사: ${score.metadata.lyricist}`:'',margin,Math.round(canvasHeight*.085));
+        ctx.textAlign='right';ctx.fillText(score.metadata.composer?`작곡: ${score.metadata.composer}`:'',canvasWidth-margin,Math.round(canvasHeight*.085));
+      }
+      ctx.drawImage(source.image,0,slice.sourceY,source.width,slice.height,margin,slice.top,contentWidth,slice.height*scale);
+      jpegs.push(jpegBytes(canvas.toDataURL('image/jpeg',.94)));
+    }
+    const pdf=buildPdf(jpegs,page.pt[0],page.pt[1],canvasWidth,canvasHeight);
+    const url=URL.createObjectURL(new Blob([pdf],{type:'application/pdf'}));
+    if(preview) preview.location.replace(url);
+    else { const link=document.createElement('a');link.href=url;link.target='_blank';link.rel='noopener';link.click(); }
+    setTimeout(()=>URL.revokeObjectURL(url),120000);
+  } catch(error) {
+    if(preview) preview.close();
+    alert(`PDF 생성 중 문제가 생겼습니다: ${error.message}`);
+  }
+}
+
 function importMusicXml(text) {
   const doc = new DOMParser().parseFromString(text, 'application/xml');
   if (doc.querySelector('parsererror')) throw new Error('올바른 MusicXML 파일이 아닙니다.');
@@ -421,13 +547,7 @@ $('#instrument').addEventListener('change', (e) => { score.instrument=e.target.v
 ['title','lyricist','composer'].forEach((key) => $(`#${key}`).addEventListener('input', (e) => { score.metadata[key]=e.target.value;render(); }));
 $('#xmlExport').addEventListener('click', () => download(`${score.metadata.title||'score'}.musicxml`,toMusicXml(),'application/vnd.recordare.musicxml+xml'));
 $('#xmlImport').addEventListener('change', async (e) => { try{const file=e.target.files[0];if(file)importMusicXml(await file.text());}catch(err){alert(err.message);}e.target.value=''; });
-$('#pdf').addEventListener('click', () => {
-  let printStyle = $('#printPageSize');
-  if (!printStyle) { printStyle=document.createElement('style');printStyle.id='printPageSize';document.head.append(printStyle); }
-  const page = ['A3','A4','Letter'].includes(score.page) ? score.page : 'A4';
-  printStyle.textContent = `@page { size: ${page} portrait; margin: 0; }`;
-  window.print();
-});
+$('#pdf').addEventListener('click', exportPdf);
 $('#help').addEventListener('click', () => $('#helpDialog').showModal());
 $('#helpDialog button').addEventListener('click', () => $('#helpDialog').close());
 
@@ -452,4 +572,4 @@ document.addEventListener('keydown', (e) => {
 
 syncMetadataInputs(); updateControls(); render();
 
-export { score, toMusicXml, importMusicXml, pitchY, writtenMidi };
+export { score, toMusicXml, importMusicXml, pitchY, writtenMidi, buildPdf };

@@ -20,6 +20,9 @@ let restMode = false;
 let graceMode = false;
 let fretBuffer = '';
 let undoStack = [];
+let dragAnchor = null;
+let dragMoved = false;
+let ignoreNextClick = false;
 
 // Keyboard letters enter the lower guitar octave by default: C3–B3.
 const PITCH_BY_CODE = { KeyA: 57, KeyB: 59, KeyC: 48, KeyD: 50, KeyE: 52, KeyF: 53, KeyG: 55 };
@@ -59,6 +62,28 @@ function setSelection(measure, voice, noteId = null, extend = false, source = 's
   updateControls();
   render();
 }
+
+function beginRangeSelection(event, measure, voice, noteId, source) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  dragAnchor = { measure, voice, noteId, source };
+  dragMoved = false;
+  setSelection(measure, voice, noteId, false, source);
+}
+
+function extendRangeSelection(measure, voice, noteId) {
+  if (!dragAnchor || (dragAnchor.measure === measure && dragAnchor.voice === voice && dragAnchor.noteId === noteId)) return;
+  dragMoved = true;
+  score.selection.rangeEnd = { measure, voice, noteId };
+  updateControls();
+  render();
+}
+
+document.addEventListener('pointerup', () => {
+  if (dragMoved) ignoreNextClick = true;
+  dragAnchor = null;
+  dragMoved = false;
+});
 
 function notePosition(note, measure, voice) {
   let tick = 0;
@@ -130,8 +155,14 @@ function drawNote(note, measure, measureIndex, voice, x, staffY, tabY, group, be
     if (note.duration <= 2 && beamLevel < 2) svg('path', { d:stemUp?`M${stemX},${stemEndY+9} q13,7 2,18`:`M${stemX},${stemEndY-9} q-13,-7 -2,-18`, fill:'none', class:'stem' }, g);
     if (note.dotted) svg('circle', { cx:x+12, cy:y, r:2, class:'notehead' }, g);
   }
-  svg('rect', { x:x-15, y:staffY-12, width:30, height:STAFF_HEIGHT+24, class:'hit' }, g)
-    .addEventListener('click', (e) => { e.stopPropagation(); setSelection(measureIndex, voice, note.id, e.shiftKey, 'staff'); });
+  const staffHit = svg('rect', { x:x-15, y:staffY-12, width:30, height:STAFF_HEIGHT+24, class:'hit' }, g);
+  staffHit.addEventListener('pointerdown', (e) => beginRangeSelection(e, measureIndex, voice, note.id, 'staff'));
+  staffHit.addEventListener('pointerenter', () => extendRangeSelection(measureIndex, voice, note.id));
+  staffHit.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (ignoreNextClick) { ignoreNextClick=false; return; }
+    setSelection(measureIndex, voice, note.id, e.shiftKey, 'staff');
+  });
 
   if (!note.rest && score.instrument !== 'piano') {
     const tabX = x + TAB_VOICE_OFFSET[voice];
@@ -141,15 +172,26 @@ function drawNote(note, measure, measureIndex, voice, x, staffY, tabY, group, be
     const width = Math.max(14, label.length * 9 + 5);
     svg('rect', { x:tabX-width/2, y:ty-8, width, height:16, rx:1, class:'tab-bg' }, tg);
     svg('text', { x:tabX, y:ty+.5, class:'tab-number', text:label }, tg);
-    svg('rect', { x:tabX-13, y:ty-11, width:26, height:22, class:'hit' }, tg)
-      .addEventListener('click', (e) => { e.stopPropagation(); setSelection(measureIndex, voice, note.id, e.shiftKey, 'tab'); });
+    const tabHit=svg('rect', { x:tabX-13, y:ty-11, width:26, height:22, class:'hit' }, tg);
+    tabHit.addEventListener('pointerdown', (e) => beginRangeSelection(e, measureIndex, voice, note.id, 'tab'));
+    tabHit.addEventListener('pointerenter', () => extendRangeSelection(measureIndex, voice, note.id));
+    tabHit.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (ignoreNextClick) { ignoreNextClick=false; return; }
+      setSelection(measureIndex, voice, note.id, e.shiftKey, 'tab');
+    });
   }
 }
 
 function beamData(measure, voice) {
   const levels = new Map();
   const groups = [];
-  const groupLength=groupingTicks(score.timeSignature);
+  const beatLength = 8 * (4 / score.timeSignature.beatType);
+  const compound = score.timeSignature.beatType === 8 && score.timeSignature.beats >= 6 && score.timeSignature.beats % 3 === 0;
+  // In 4/4, consecutive eighths conventionally read as 1–2 | 3–4:
+  // four eighths per beam.  Sixteenths still reveal every quarter-note beat.
+  const eighthGroupLength = score.timeSignature.beats === 4 && score.timeSignature.beatType === 4
+    ? beatLength * 2 : groupingTicks(score.timeSignature);
   let tick = 0, current = [], groupIndex = null;
   const flush = () => {
     if (current.length > 1) {
@@ -162,6 +204,8 @@ function beamData(measure, voice) {
     current=[]; groupIndex=null;
   };
   for (const note of measure.voices[voice]) {
+    const groupLength = (note.duration <= 2 || current.some((item) => item.note.duration <= 2))
+      ? (compound ? groupingTicks(score.timeSignature) : beatLength) : eighthGroupLength;
     const currentGroup=Math.floor(tick / groupLength);
     if (note.rest || note.duration > 4 || (groupIndex !== null && currentGroup !== groupIndex)) flush();
     if (!note.rest && note.duration <= 4) {
@@ -315,19 +359,20 @@ function render() {
     const lowerHeight = piano ? STAFF_HEIGHT : TAB_HEIGHT;
     const tabBottom = tabY + lowerHeight;
     // One square bracket makes the staff and tablature a single guitar part.
-    svg('path', { d:`M${left-1},${staffY} H${left-9} V${tabBottom} H${left-1}`, class:'system-bracket' });
-    svg('text', { x:left+5, y:staffY+50, text:'𝄞', 'font-size':56, 'font-family':'serif' });
-    if (!piano) svg('text', { x:left+22, y:staffY+77, text:'8', 'font-size':13, 'font-family':'serif', 'text-anchor':'middle' });
-    const timeX=left+51;
-    svg('text', { x:timeX, y:staffY+29, text:String(score.timeSignature.beats), 'font-size':29, 'font-family':'serif', 'text-anchor':'middle' });
-    svg('text', { x:timeX, y:staffY+59, text:String(score.timeSignature.beatType), 'font-size':29, 'font-family':'serif', 'text-anchor':'middle' });
+    svg('path', { d:`M${left-1},${staffY-7} H${left-9} V${tabBottom+1} H${left-1}`, class:'system-bracket' });
+    // Guitar clef deliberately extends beyond the five lines, as in published guitar scores.
+    svg('text', { x:left+4, y:staffY+58, text:'𝄞', 'font-size':76, 'font-family':'serif' });
+    if (!piano) svg('text', { x:left+23, y:staffY+80, text:'8', 'font-size':14, 'font-family':'serif', 'text-anchor':'middle' });
+    const timeX=left+58;
+    svg('text', { x:timeX, y:staffY+30, text:String(score.timeSignature.beats), 'font-size':34, 'font-family':'serif', 'text-anchor':'middle' });
+    svg('text', { x:timeX, y:staffY+63, text:String(score.timeSignature.beatType), 'font-size':34, 'font-family':'serif', 'text-anchor':'middle' });
     if (piano) svg('text', { x:left+5, y:tabY+50, text:'𝄢', 'font-size':52, 'font-family':'serif', 'font-weight':700 });
     else ['T','A','B'].forEach((letter, i) => svg('text', { x:left+6, y:tabY+18+i*16, text:letter, 'font-size':11, 'font-family':'serif', 'font-weight':700 }));
     for (let line = 0; line < 5; line++) svg('line', { x1:left, y1:staffY+line*STAFF_LINE_GAP, x2:left+usable, y2:staffY+line*STAFF_LINE_GAP, class:'staff-line' });
     for (let line = 0; line < (piano?5:6); line++) svg('line', { x1:left, y1:tabY+line*(piano?STAFF_LINE_GAP:TAB_LINE_GAP), x2:left+usable, y2:tabY+line*(piano?STAFF_LINE_GAP:TAB_LINE_GAP), class:piano?'staff-line':'tab-line' });
     items.forEach(({ measure, index }, localIndex) => {
       const x = left + localIndex * measureWidth;
-      const noteLeft = localIndex === 0 ? 84 : 25;
+      const noteLeft = localIndex === 0 ? 101 : 25;
       const noteWidth = measureWidth - noteLeft - 14;
       layouts.set(index, { x, width:measureWidth, noteLeft, noteWidth, staffY, tabY, system:systemIndex });
       if (score.selection.measure === index && !score.selection.noteId) svg('rect', { x, y:staffY-7, width:measureWidth, height:tabY+lowerHeight+8-staffY, class:'selected-measure' });
@@ -539,7 +584,7 @@ function scoreImage() {
     clone.setAttribute('xmlns', NS);
     clone.querySelectorAll('.hit,.measure-hit,.selected-measure').forEach((node)=>node.remove());
     const style=document.createElementNS(NS,'style');
-    style.textContent='.staff-line,.ledger-line,.tab-line,.barline{stroke:#111;stroke-width:1}.notehead{fill:#111!important}.stem{stroke:#111!important;stroke-width:1.3;fill:none}.beam{stroke:#111;stroke-width:5}.secondary-beam{stroke-width:3.5}.tab-bg{fill:#fff;stroke:none}.tab-number{fill:#111!important;font:bold 14px Arial;text-anchor:middle;dominant-baseline:middle}.inactive-voice{opacity:1}.slur,.tie{fill:none;stroke:#111;stroke-width:1.5}.barre{fill:none;stroke:#111;stroke-width:1.2;stroke-dasharray:5 4}.annotation-text{font:italic 13px serif}.break-mark{display:none}';
+    style.textContent='.staff-line,.ledger-line,.tab-line,.barline{stroke:#111;stroke-width:1}.system-bracket{fill:none;stroke:#111;stroke-width:2}.notehead{fill:#111!important}.stem{stroke:#111!important;stroke-width:1.3;fill:none}.beam{stroke:#111;stroke-width:5}.secondary-beam{stroke-width:3.5}.tab-bg{fill:#fff;stroke:none}.tab-number{fill:#111!important;font:bold 14px Arial;text-anchor:middle;dominant-baseline:middle}.inactive-voice{opacity:1}.slur,.tie{fill:none;stroke:#111;stroke-width:1.5}.barre{fill:none;stroke:#111;stroke-width:1.2;stroke-dasharray:5 4}.annotation-text{font:italic 13px serif}.break-mark{display:none}';
     clone.prepend(style);
     const viewBoxValues=clone.getAttribute('viewBox').trim().split(/\s+/).map(Number);
     const viewBox={width:viewBoxValues[2],height:viewBoxValues[3]};
@@ -657,7 +702,12 @@ $('#voice').addEventListener('click', () => { score.activeVoice=(score.activeVoi
 $('#grace').addEventListener('click', () => { const e=selectedEntry();if(e){remember();e.note.grace=!e.note.grace;}else graceMode=!graceMode;updateControls();render(); });
 $('#tie').addEventListener('click', () => addAnnotation('tie'));
 $('#slur').addEventListener('click', () => addAnnotation('slur'));
-$('#barre').addEventListener('click', () => { const range=orderedSelection();if(!range){status.textContent='바레 시작 음표를 선택하고 Shift+클릭으로 끝 음표를 고르세요.';return;}const fret=selectedEntry()?.note.fret||5;const value=prompt('바레 프렛 번호', String(fret));if(value===null)return;remember();score.annotations.push({type:'barre',...range,text:`C.${Math.max(1,Number(value)||5)}`});render(); });
+$('#barre').addEventListener('click', () => {
+  const range=orderedSelection();
+  if(!range){status.textContent='오선 또는 타브 위에서 첫 음표부터 마지막 음표까지 드래그한 뒤 바레를 누르세요.';return;}
+  const value=$('#barreFret').value;
+  remember();score.annotations.push({type:'barre',...range,text:`C.${Math.max(1,Math.min(30,Number(value)||1))}`});render();
+});
 $('#undo').addEventListener('click', () => { if(!undoStack.length)return;score=undoStack.pop();syncMetadataInputs();updateControls();render(); });
 $('#clear').addEventListener('click', () => { remember();score.measures=[createMeasure()];score.annotations=[];score.selection={measure:0,voice:score.activeVoice,noteId:null,source:'staff',rangeEnd:null};render(); });
 $('#page').addEventListener('change', (e) => { score.page=e.target.value;render(); });

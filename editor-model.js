@@ -1,0 +1,63 @@
+export const TICKS_PER_QUARTER = 8;
+export const MEASURE_TICKS = 32;
+export const TUNING = [64, 59, 55, 50, 45, 40];
+
+let nextId = 1;
+
+export function uid(prefix = 'id') {
+  return `${prefix}-${Date.now().toString(36)}-${nextId++}`;
+}
+
+export function createNote({ midi = 64, string = 1, fret = 0, duration = 8, dotted = false, grace = false } = {}) {
+  return {
+    id: uid('note'), midi, string, fret, duration, dotted, grace,
+    tieToNext: false, slurTo: null,
+  };
+}
+
+export function createMeasure() {
+  return { id: uid('measure'), forceBreakAfter: false, voices: [[], [], [], []], annotations: [] };
+}
+
+export function createScore() {
+  return {
+    page: 'A4', instrument: 'classical-guitar',
+    metadata: { title: '', lyricist: '', composer: '' },
+    measures: [createMeasure()], annotations: [], activeVoice: 0,
+    selection: { measure: 0, voice: 0, noteId: null, rangeEnd: null },
+  };
+}
+
+export function durationTicks(note) {
+  return note.grace ? 0 : note.duration * (note.dotted ? 1.5 : 1);
+}
+
+export function measureTicks(measure, voice) {
+  return measure.voices[voice].reduce((sum, note) => sum + durationTicks(note), 0);
+}
+
+export function noteFromStringFret(string, fret, duration = 8, dotted = false, grace = false) {
+  const s = Math.max(1, Math.min(6, string));
+  const f = Math.max(0, Math.min(30, fret));
+  return createNote({ midi: TUNING[s - 1] + f, string: s, fret: f, duration, dotted, grace });
+}
+
+export function positionsForMidi(midi) {
+  return TUNING.map((open, index) => ({ string: index + 1, fret: midi - open }))
+    .filter(({ fret }) => fret >= 0 && fret <= 30);
+}
+
+export function cloneScore(score) {
+  return JSON.parse(JSON.stringify(score));
+}
+
+export function ensureMeasure(score, index) {
+  while (score.measures.length <= index) score.measures.push(createMeasure());
+  return score.measures[index];
+}
+
+export function allNotes(score, voice = score.activeVoice) {
+  return score.measures.flatMap((measure, measureIndex) =>
+    measure.voices[voice].map((note) => ({ note, measure, measureIndex, voice }))
+  );
+}

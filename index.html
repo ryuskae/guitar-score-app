@@ -11,7 +11,7 @@
     .top,.toolbar{display:flex;align-items:center;gap:7px;flex-wrap:wrap;max-width:1200px;margin:auto}
     .brand{font-weight:800;margin-right:auto}.top input{width:150px;padding:6px 8px;border:1px solid #64748b;border-radius:5px;background:#fff;color:#111}
     .toolbar{margin-top:8px}.toolbar button,.toolbar select,.file-label{border:1px solid #526078;background:#26344e;color:#fff;border-radius:5px;padding:6px 9px;cursor:pointer}
-    .toolbar button:hover,.toolbar button.active,.file-label:hover{background:#315ca8}.toolbar .danger:hover{background:#a83030}
+    .toolbar button:hover,.toolbar button.active,.file-label:hover{background:#315ca8}.toolbar .danger:hover{background:#a83030}.barre-control{display:inline-flex;align-items:center;gap:2px;color:#fff;font:600 14px serif}.barre-control input{width:43px;padding:5px 4px;border:1px solid #526078;border-radius:4px;background:#fff;color:#111}
     .sep{width:1px;height:25px;background:#63708a;margin:0 2px}.file-label input{display:none}
     main{padding:22px 10px 60px}.sheet{position:relative;margin:auto;background:#fff;box-shadow:0 4px 24px #26344e33;min-height:297mm;width:210mm;padding:15mm 12mm;overflow:hidden}
     .sheet[data-page="A3"]{width:297mm;min-height:420mm}.sheet[data-page="Letter"]{width:216mm;min-height:279mm}.sheet[data-page="Screen"]{width:min(1180px,96vw);min-height:700px}
@@ -36,7 +36,7 @@
     <div class="toolbar">
       <button data-duration="32">온음표</button><button data-duration="16">2분</button><button data-duration="8" class="active">4분</button><button data-duration="4">8분</button><button data-duration="2">16분</button>
       <button id="dot" title="점음표">.</button><button id="rest">쉼표</button><button id="voice">V1</button>
-      <span class="sep"></span><button id="tie">타이</button><button id="slur">슬러</button><button id="grace">꾸밈음</button><button id="barre">바레</button>
+      <span class="sep"></span><button id="tie">타이</button><button id="slur">슬러</button><button id="grace">꾸밈음</button><button id="barre">바레</button><label class="barre-control">C.<input id="barreFret" type="number" min="1" max="30" value="5" aria-label="바레 프렛"></label>
       <span class="sep"></span><button id="undo">실행 취소</button><button id="clear" class="danger">전체 지우기</button>
       <select id="instrument" title="악기"><option value="classical-guitar">클래식 기타</option><option value="acoustic-guitar">통기타</option><option value="electric-guitar">일렉 기타</option><option value="piano">피아노</option></select>
       <select id="timeSignature" title="박자표"><option value="2/4">2/4</option><option value="3/4">3/4</option><option value="4/4" selected>4/4</option><option value="5/4">5/4</option><option value="6/8">6/8</option><option value="9/8">9/8</option><option value="12/8">12/8</option></select>
@@ -51,7 +51,7 @@
     </article>
     <div class="status" id="status">빈 마디를 클릭한 뒤 키보드 A–G로 음표를 입력하세요. TAB 숫자를 클릭하면 바로 편집할 수 있습니다.</div>
   </main>
-  <dialog id="helpDialog"><h3>키보드 입력</h3><p>A–G(한글 입력 상태에서도 물리 키 기준): 기본 한 옥타브 낮은 음 입력 · . : 점음표 켜기/끄기 · 숫자: 선택한 TAB 프렛 변경 · ←/→: 음표 이동 · ↑/↓: 선택 음표 반음 이동 · Ctrl+↑/↓: 한 옥타브 이동 · Enter: 선택 마디 다음에서 줄바꿈 · V: 성부 전환 · Delete: 삭제 · Shift+클릭: 범위 선택</p><button autofocus>닫기</button></dialog>
+  <dialog id="helpDialog"><h3>키보드 입력</h3><p>A–G(한글 입력 상태에서도 물리 키 기준): 기본 한 옥타브 낮은 음 입력 · . : 점음표 켜기/끄기 · 숫자: 선택한 TAB 프렛 변경 · ←/→: 음표 이동 · 오선 선택 후 ↑/↓: 반음 이동 · TAB 선택 후 ↑/↓: 같은 음을 인접 줄로 이동 · Ctrl+↑/↓: 한 옥타브 이동 · Enter: 선택 마디 다음에서 줄바꿈 · V: 성부 전환 · Delete: 삭제 · 음표를 드래그: 범위 선택 후 바레</p><button autofocus>닫기</button></dialog>
   <script type="module" src="./editor.js"></script>
 </body>
 </html>

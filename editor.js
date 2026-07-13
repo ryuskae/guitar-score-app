@@ -107,7 +107,7 @@ function drawLedgerLines(x, y, staffY, group) {
   if (y >= bottom + STAFF_LINE_GAP) for (let yy = bottom + STAFF_LINE_GAP; yy <= y + 1; yy += STAFF_LINE_GAP) svg('line', { x1:x-10, y1:yy, x2:x+10, y2:yy, class:'ledger-line' }, group);
 }
 
-function drawNote(note, measure, measureIndex, voice, x, staffY, tabY, group, beamLevel = 0) {
+function drawNote(note, measure, measureIndex, voice, x, staffY, tabY, group, beamLevel = 0, beamEndY = null) {
   const selected = score.selection.noteId === note.id;
   const inactive = voice !== score.activeVoice;
   const cls = `voice-${voice} ${selected ? 'selected' : ''} ${inactive ? 'inactive-voice' : ''}`;
@@ -121,7 +121,9 @@ function drawNote(note, measure, measureIndex, voice, x, staffY, tabY, group, be
     const scale = note.grace ? .7 : 1;
     const stemUp = voice % 2 === 0;
     const stemX = x + (stemUp ? 5 : -5) * scale;
-    const stemEndY = y + (stemUp ? -45 : 45) * scale;
+    // A beamed note's stem must meet the beam itself.  Keeping the old fixed
+    // stem length here made large leaps punch through the beam.
+    const stemEndY = beamEndY ?? (y + (stemUp ? -45 : 45) * scale);
     svg('ellipse', { cx:x, cy:y, rx:7*scale, ry:5*scale, transform:`rotate(-18 ${x} ${y})`, class:'notehead' }, g);
     if (note.duration < 32) svg('line', { x1:stemX, y1:y, x2:stemX, y2:stemEndY, class:'stem' }, g);
     if (note.duration <= 4 && beamLevel < 1) svg('path', { d:stemUp?`M${stemX},${stemEndY} q13,7 2,18`:`M${stemX},${stemEndY} q-13,-7 -2,-18`, fill:'none', class:'stem' }, g);
@@ -153,12 +155,9 @@ function beamData(measure, voice) {
     if (current.length > 1) {
       current.forEach(({note}) => levels.set(note.id, 1));
       groups.push(current);
-      let sixteenths=[];
-      const flushSecondary=()=>{ if(sixteenths.length>1) sixteenths.forEach(({note})=>levels.set(note.id,2)); sixteenths=[]; };
-      current.forEach((item) => {
-        if (item.note.duration <= 2) sixteenths.push(item); else flushSecondary();
-      });
-      flushSecondary();
+      // Every sixteenth in a primary group belongs to a second beam (a
+      // singleton gets a short secondary hook rather than a flag).
+      current.filter(({note}) => note.duration <= 2).forEach(({note}) => levels.set(note.id, 2));
     }
     current=[]; groupIndex=null;
   };
@@ -175,11 +174,30 @@ function beamData(measure, voice) {
   return { levels, groups };
 }
 
-function drawBeams(groups, positions, voice, group) {
+function beamGeometry(groups, positions, voice) {
+  const stemUp = voice % 2 === 0;
+  const endpoints = new Map();
+  for (const notes of groups) {
+    const first = positions.get(notes[0].note.id), last = positions.get(notes.at(-1).note.id);
+    if (!first || !last) continue;
+    // Engraving convention: beams only slope gently, then every stem extends
+    // exactly to that line.  This also keeps sudden leaps visually clean.
+    const slope = Math.max(-12, Math.min(12, (last.y - first.y) * 0.25));
+    const startY = first.y + (stemUp ? -42 : 42);
+    const dx = Math.max(1, last.x - first.x);
+    notes.forEach((item) => {
+      const p = positions.get(item.note.id);
+      endpoints.set(item.note.id, startY + slope * ((p.x - first.x) / dx));
+    });
+  }
+  return endpoints;
+}
+
+function drawBeams(groups, positions, voice, group, endpoints) {
   const stemUp = voice % 2 === 0;
   const endpoint = (item, level = 0) => {
     const position=positions.get(item.note.id);
-    return { x:position.x+(stemUp?5:-5), y:position.y+(stemUp?-45:45)+(stemUp?-1:1)*level*9 };
+    return { x:position.x+(stemUp?5:-5), y:(endpoints.get(item.note.id) ?? position.y+(stemUp?-42:42))+(stemUp?-1:1)*level*9 };
   };
   for (const notes of groups) {
     const first=endpoint(notes[0]), last=endpoint(notes.at(-1));
@@ -189,6 +207,14 @@ function drawBeams(groups, positions, voice, group) {
       if(secondary.length>1) {
         const a=endpoint(secondary[0],1),b=endpoint(secondary.at(-1),1);
         svg('line',{x1:a.x,y1:a.y,x2:b.x,y2:b.y,class:'beam secondary-beam'},group);
+      } else if (secondary.length === 1) {
+        // A lone sixteenth receives a short hook, following the nearest
+        // rhythmic neighbour just like conventional beaming.
+        const item = secondary[0], index = notes.indexOf(item);
+        const toward = notes[index + 1] || notes[index - 1];
+        const a = endpoint(item, 1);
+        const direction = toward && toward.tick < item.tick ? -1 : 1;
+        svg('line', { x1:a.x, y1:a.y, x2:a.x + direction * 10, y2:a.y, class:'beam secondary-beam' }, group);
       }
       secondary=[];
     };
@@ -285,11 +311,16 @@ function render() {
     const staffY = y + 24, tabY = staffY + STAFF_HEIGHT + 47;
     const left = 18, usable = width - 36;
     const measureWidth = usable / items.length;
-    svg('text', { x:left+5, y:staffY+50, text:'𝄞', 'font-size':56, 'font-family':'serif' });
-    const timeX=left+46;
-    svg('text', { x:timeX, y:staffY+25, text:String(score.timeSignature.beats), 'font-size':22, 'font-family':'serif', 'text-anchor':'middle' });
-    svg('text', { x:timeX, y:staffY+51, text:String(score.timeSignature.beatType), 'font-size':22, 'font-family':'serif', 'text-anchor':'middle' });
     const piano = score.instrument === 'piano';
+    const lowerHeight = piano ? STAFF_HEIGHT : TAB_HEIGHT;
+    const tabBottom = tabY + lowerHeight;
+    // One square bracket makes the staff and tablature a single guitar part.
+    svg('path', { d:`M${left-1},${staffY} H${left-9} V${tabBottom} H${left-1}`, class:'system-bracket' });
+    svg('text', { x:left+5, y:staffY+50, text:'𝄞', 'font-size':56, 'font-family':'serif' });
+    if (!piano) svg('text', { x:left+22, y:staffY+77, text:'8', 'font-size':13, 'font-family':'serif', 'text-anchor':'middle' });
+    const timeX=left+51;
+    svg('text', { x:timeX, y:staffY+29, text:String(score.timeSignature.beats), 'font-size':29, 'font-family':'serif', 'text-anchor':'middle' });
+    svg('text', { x:timeX, y:staffY+59, text:String(score.timeSignature.beatType), 'font-size':29, 'font-family':'serif', 'text-anchor':'middle' });
     if (piano) svg('text', { x:left+5, y:tabY+50, text:'𝄢', 'font-size':52, 'font-family':'serif', 'font-weight':700 });
     else ['T','A','B'].forEach((letter, i) => svg('text', { x:left+6, y:tabY+18+i*16, text:letter, 'font-size':11, 'font-family':'serif', 'font-weight':700 }));
     for (let line = 0; line < 5; line++) svg('line', { x1:left, y1:staffY+line*STAFF_LINE_GAP, x2:left+usable, y2:staffY+line*STAFF_LINE_GAP, class:'staff-line' });
@@ -299,7 +330,6 @@ function render() {
       const noteLeft = localIndex === 0 ? 84 : 25;
       const noteWidth = measureWidth - noteLeft - 14;
       layouts.set(index, { x, width:measureWidth, noteLeft, noteWidth, staffY, tabY, system:systemIndex });
-      const lowerHeight=piano?STAFF_HEIGHT:TAB_HEIGHT;
       if (score.selection.measure === index && !score.selection.noteId) svg('rect', { x, y:staffY-7, width:measureWidth, height:tabY+lowerHeight+8-staffY, class:'selected-measure' });
       svg('rect', { x, y:staffY-9, width:measureWidth, height:tabY+lowerHeight+13-staffY, class:'measure-hit' })
         .addEventListener('click', (e) => { e.stopPropagation(); setSelection(index, score.activeVoice, null, e.shiftKey); });
@@ -313,9 +343,13 @@ function render() {
           const tick = notePosition(note, measure, voice);
           const nx = x + noteLeft + (tick / measureLimit()) * noteWidth;
           positions.set(note.id,{x:nx,y:pitchY(note.midi,staffY)});
-          drawNote(note, measure, index, voice, nx, staffY, tabY, scoreSvg, beam.levels.get(note.id)||0);
         });
-        drawBeams(beam.groups,positions,voice,scoreSvg);
+        const endpoints=beamGeometry(beam.groups,positions,voice);
+        measure.voices[voice].forEach((note) => {
+          const position=positions.get(note.id);
+          drawNote(note, measure, index, voice, position.x, staffY, tabY, scoreSvg, beam.levels.get(note.id)||0, endpoints.get(note.id));
+        });
+        drawBeams(beam.groups,positions,voice,scoreSvg,endpoints);
       }
       if (measure.forceBreakAfter) svg('text', { x:x+measureWidth-14, y:staffY-5, text:'↵', class:'break-mark' });
     });

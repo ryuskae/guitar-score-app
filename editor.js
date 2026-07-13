@@ -1,6 +1,6 @@
 import {
-  MEASURE_TICKS, TUNING, createScore, createMeasure, noteFromStringFret,
-  durationTicks, measureTicks, positionsForMidi, cloneScore, allNotes,
+  TUNING, createScore, createMeasure, noteFromStringFret,
+  durationTicks, measureTicks, positionsForMidi, cloneScore, allNotes, timeSignatureTicks, groupingTicks,
 } from './editor-model.js';
 
 const NS = 'http://www.w3.org/2000/svg';
@@ -48,11 +48,11 @@ function selectedEntry() {
   return note ? { note, measure, measureIndex: s.measure, voice: s.voice } : null;
 }
 
-function setSelection(measure, voice, noteId = null, extend = false) {
+function setSelection(measure, voice, noteId = null, extend = false, source = 'staff') {
   if (extend && score.selection.noteId) {
     score.selection.rangeEnd = { measure, voice, noteId };
   } else {
-    score.selection = { measure, voice, noteId, rangeEnd: null };
+    score.selection = { measure, voice, noteId, source, rangeEnd: null };
     score.activeVoice = voice;
   }
   fretBuffer = '';
@@ -68,6 +68,8 @@ function notePosition(note, measure, voice) {
   }
   return tick;
 }
+
+function measureLimit() { return timeSignatureTicks(score.timeSignature); }
 
 function systems() {
   const groups = [];
@@ -127,7 +129,7 @@ function drawNote(note, measure, measureIndex, voice, x, staffY, tabY, group, be
     if (note.dotted) svg('circle', { cx:x+12, cy:y, r:2, class:'notehead' }, g);
   }
   svg('rect', { x:x-15, y:staffY-12, width:30, height:STAFF_HEIGHT+24, class:'hit' }, g)
-    .addEventListener('click', (e) => { e.stopPropagation(); setSelection(measureIndex, voice, note.id, e.shiftKey); });
+    .addEventListener('click', (e) => { e.stopPropagation(); setSelection(measureIndex, voice, note.id, e.shiftKey, 'staff'); });
 
   if (!note.rest && score.instrument !== 'piano') {
     const tabX = x + TAB_VOICE_OFFSET[voice];
@@ -138,14 +140,15 @@ function drawNote(note, measure, measureIndex, voice, x, staffY, tabY, group, be
     svg('rect', { x:tabX-width/2, y:ty-8, width, height:16, rx:1, class:'tab-bg' }, tg);
     svg('text', { x:tabX, y:ty+.5, class:'tab-number', text:label }, tg);
     svg('rect', { x:tabX-13, y:ty-11, width:26, height:22, class:'hit' }, tg)
-      .addEventListener('click', (e) => { e.stopPropagation(); setSelection(measureIndex, voice, note.id, e.shiftKey); });
+      .addEventListener('click', (e) => { e.stopPropagation(); setSelection(measureIndex, voice, note.id, e.shiftKey, 'tab'); });
   }
 }
 
 function beamData(measure, voice) {
   const levels = new Map();
   const groups = [];
-  let tick = 0, current = [], beat = null;
+  const groupLength=groupingTicks(score.timeSignature);
+  let tick = 0, current = [], groupIndex = null;
   const flush = () => {
     if (current.length > 1) {
       current.forEach(({note}) => levels.set(note.id, 1));
@@ -157,13 +160,13 @@ function beamData(measure, voice) {
       });
       flushSecondary();
     }
-    current=[]; beat=null;
+    current=[]; groupIndex=null;
   };
   for (const note of measure.voices[voice]) {
-    const noteBeat = Math.floor(tick / 8);
-    if (note.rest || note.duration > 4 || (beat !== null && noteBeat !== beat)) flush();
+    const currentGroup=Math.floor(tick / groupLength);
+    if (note.rest || note.duration > 4 || (groupIndex !== null && currentGroup !== groupIndex)) flush();
     if (!note.rest && note.duration <= 4) {
-      if (beat === null) beat=noteBeat;
+      if (groupIndex === null) groupIndex=currentGroup;
       current.push({note,tick});
     }
     tick += durationTicks(note);
@@ -202,8 +205,8 @@ function endpointFor(ref, layouts) {
   if (!layout || !note) return null;
   const tick = notePosition(note, measure, ref.voice);
   return {
-    x: layout.x + layout.noteLeft + (tick / MEASURE_TICKS) * layout.noteWidth,
-    noteY: pitchY(note.midi, layout.staffY), tabX:layout.x+layout.noteLeft+(tick/MEASURE_TICKS)*layout.noteWidth+TAB_VOICE_OFFSET[ref.voice],
+    x: layout.x + layout.noteLeft + (tick / measureLimit()) * layout.noteWidth,
+    noteY: pitchY(note.midi, layout.staffY), tabX:layout.x+layout.noteLeft+(tick/measureLimit())*layout.noteWidth+TAB_VOICE_OFFSET[ref.voice],
     tabNoteY:layout.tabY+(note.string-1)*TAB_LINE_GAP,
     staffY:layout.staffY, tabY:layout.tabY, system:layout.system,
   };
@@ -283,6 +286,9 @@ function render() {
     const left = 18, usable = width - 36;
     const measureWidth = usable / items.length;
     svg('text', { x:left+5, y:staffY+50, text:'𝄞', 'font-size':56, 'font-family':'serif' });
+    const timeX=left+46;
+    svg('text', { x:timeX, y:staffY+25, text:String(score.timeSignature.beats), 'font-size':22, 'font-family':'serif', 'text-anchor':'middle' });
+    svg('text', { x:timeX, y:staffY+51, text:String(score.timeSignature.beatType), 'font-size':22, 'font-family':'serif', 'text-anchor':'middle' });
     const piano = score.instrument === 'piano';
     if (piano) svg('text', { x:left+5, y:tabY+50, text:'𝄢', 'font-size':52, 'font-family':'serif', 'font-weight':700 });
     else ['T','A','B'].forEach((letter, i) => svg('text', { x:left+6, y:tabY+18+i*16, text:letter, 'font-size':11, 'font-family':'serif', 'font-weight':700 }));
@@ -290,7 +296,7 @@ function render() {
     for (let line = 0; line < (piano?5:6); line++) svg('line', { x1:left, y1:tabY+line*(piano?STAFF_LINE_GAP:TAB_LINE_GAP), x2:left+usable, y2:tabY+line*(piano?STAFF_LINE_GAP:TAB_LINE_GAP), class:piano?'staff-line':'tab-line' });
     items.forEach(({ measure, index }, localIndex) => {
       const x = left + localIndex * measureWidth;
-      const noteLeft = localIndex === 0 ? 58 : 25;
+      const noteLeft = localIndex === 0 ? 84 : 25;
       const noteWidth = measureWidth - noteLeft - 14;
       layouts.set(index, { x, width:measureWidth, noteLeft, noteWidth, staffY, tabY, system:systemIndex });
       const lowerHeight=piano?STAFF_HEIGHT:TAB_HEIGHT;
@@ -305,7 +311,7 @@ function render() {
         const positions=new Map();
         measure.voices[voice].forEach((note) => {
           const tick = notePosition(note, measure, voice);
-          const nx = x + noteLeft + (tick / MEASURE_TICKS) * noteWidth;
+          const nx = x + noteLeft + (tick / measureLimit()) * noteWidth;
           positions.set(note.id,{x:nx,y:pitchY(note.midi,staffY)});
           drawNote(note, measure, index, voice, nx, staffY, tabY, scoreSvg, beam.levels.get(note.id)||0);
         });
@@ -341,7 +347,7 @@ function addNote(midi) {
   remember();
   let measureIndex = score.selection.measure;
   let measure = score.measures[measureIndex];
-  if (measureTicks(measure, score.activeVoice) + duration * (dotted ? 1.5 : 1) > MEASURE_TICKS) {
+  if (measureTicks(measure, score.activeVoice) + duration * (dotted ? 1.5 : 1) > measureLimit()) {
     measureIndex++;
     if (!score.measures[measureIndex]) score.measures.push(createMeasure());
     measure = score.measures[measureIndex];
@@ -350,8 +356,8 @@ function addNote(midi) {
   const note = noteFromStringFret(pos.string, pos.fret, duration, dotted, graceMode);
   note.rest = restMode;
   measure.voices[score.activeVoice].push(note);
-  score.selection = { measure:measureIndex, voice:score.activeVoice, noteId:note.id, rangeEnd:null };
-  if (measureTicks(measure, score.activeVoice) >= MEASURE_TICKS && measureIndex === score.measures.length - 1) score.measures.push(createMeasure());
+  score.selection = { measure:measureIndex, voice:score.activeVoice, noteId:note.id, source:'staff', rangeEnd:null };
+  if (measureTicks(measure, score.activeVoice) >= measureLimit() && measureIndex === score.measures.length - 1) score.measures.push(createMeasure());
   graceMode = false;
   updateControls(); render();
 }
@@ -382,7 +388,7 @@ function moveSelection(delta) {
   const index = list.findIndex(({note}) => note.id === score.selection.noteId);
   if (!list.length) return;
   const next = list[Math.max(0, Math.min(list.length-1, (index < 0 ? 0 : index) + delta))];
-  setSelection(next.measureIndex, next.voice, next.note.id);
+  setSelection(next.measureIndex, next.voice, next.note.id, false, score.selection.source || 'staff');
 }
 
 function transposeSelected(direction, octave = false) {
@@ -397,6 +403,15 @@ function transposeSelected(direction, octave = false) {
   remember();
   entry.note.midi=nextMidi; entry.note.string=position.string; entry.note.fret=position.fret;
   render();
+}
+
+function moveTabAcrossStrings(direction) {
+  const entry=selectedEntry(); if(!entry || entry.note.rest || score.instrument==='piano') return;
+  const choices=positionsForMidi(entry.note.midi).sort((a,b)=>a.string-b.string);
+  const current=choices.findIndex((position)=>position.string===entry.note.string);
+  const next=choices[current+direction];
+  if(!next) return;
+  remember(); entry.note.string=next.string;entry.note.fret=next.fret;render();
 }
 
 function changeFret(digit) {
@@ -421,9 +436,9 @@ const ALTER = [0,1,0,1,0,0,1,0,1,0,1,0];
 function toMusicXml() {
   const instrumentName = ({'classical-guitar':'Classical Guitar','acoustic-guitar':'Acoustic Guitar','electric-guitar':'Electric Guitar',piano:'Piano'})[score.instrument];
   const measures = score.measures.map((m, mi) => {
-    let body = `${mi > 0 && score.measures[mi-1].forceBreakAfter ? '<print new-system="yes"/>' : ''}${mi === 0 ? `<attributes><divisions>8</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><staves>2</staves>${score.instrument==='piano'?'':'<transpose><diatonic>0</diatonic><chromatic>0</chromatic><octave-change>-1</octave-change></transpose>'}<clef number="1"><sign>G</sign><line>2</line></clef>${score.instrument==='piano'?'<clef number="2"><sign>F</sign><line>4</line></clef>':'<clef number="2"><sign>TAB</sign><line>5</line></clef><staff-details number="2"><staff-lines>6</staff-lines></staff-details>'}</attributes>` : ''}`;
+    let body = `${mi > 0 && score.measures[mi-1].forceBreakAfter ? '<print new-system="yes"/>' : ''}${mi === 0 ? `<attributes><divisions>8</divisions><key><fifths>0</fifths></key><time><beats>${score.timeSignature.beats}</beats><beat-type>${score.timeSignature.beatType}</beat-type></time><staves>2</staves>${score.instrument==='piano'?'':'<transpose><diatonic>0</diatonic><chromatic>0</chromatic><octave-change>-1</octave-change></transpose>'}<clef number="1"><sign>G</sign><line>2</line></clef>${score.instrument==='piano'?'<clef number="2"><sign>F</sign><line>4</line></clef>':'<clef number="2"><sign>TAB</sign><line>5</line></clef><staff-details number="2"><staff-lines>6</staff-lines></staff-details>'}</attributes>` : ''}`;
     m.voices.forEach((voice, vi) => {
-      if (vi && voice.length) body += '<backup><duration>32</duration></backup>';
+      if (vi && voice.length) body += `<backup><duration>${measureLimit()}</duration></backup>`;
       voice.forEach((n) => {
         const xmlMidi = score.instrument === 'piano' ? n.midi : n.midi + 12;
         const pc = ((xmlMidi%12)+12)%12, octave = Math.floor(xmlMidi/12)-1;
@@ -561,6 +576,7 @@ function importMusicXml(text) {
   fresh.metadata.title = doc.querySelector('work-title')?.textContent || '';
   fresh.metadata.composer = doc.querySelector('creator[type="composer"]')?.textContent || '';
   fresh.metadata.lyricist = doc.querySelector('creator[type="lyricist"]')?.textContent || '';
+  fresh.timeSignature = { beats:Number(doc.querySelector('time beats')?.textContent || 4), beatType:Number(doc.querySelector('time beat-type')?.textContent || 4) };
   const importedInstrument = doc.querySelector('part-name')?.textContent?.toLowerCase() || '';
   fresh.instrument = importedInstrument.includes('piano') ? 'piano' : importedInstrument.includes('electric') ? 'electric-guitar' : importedInstrument.includes('acoustic') ? 'acoustic-guitar' : 'classical-guitar';
   const octaveChange = Number(doc.querySelector('transpose octave-change')?.textContent || 0);
@@ -592,6 +608,7 @@ function syncMetadataInputs() {
   ['title','lyricist','composer'].forEach((key) => { $(`#${key}`).value = score.metadata[key] || ''; });
   $('#page').value = score.page;
   $('#instrument').value = score.instrument;
+  $('#timeSignature').value = `${score.timeSignature.beats}/${score.timeSignature.beatType}`;
 }
 
 document.querySelectorAll('[data-duration]').forEach((button) => button.addEventListener('click', () => { duration = Number(button.dataset.duration); updateControls(); }));
@@ -608,9 +625,10 @@ $('#tie').addEventListener('click', () => addAnnotation('tie'));
 $('#slur').addEventListener('click', () => addAnnotation('slur'));
 $('#barre').addEventListener('click', () => { const range=orderedSelection();if(!range){status.textContent='바레 시작 음표를 선택하고 Shift+클릭으로 끝 음표를 고르세요.';return;}const fret=selectedEntry()?.note.fret||5;const value=prompt('바레 프렛 번호', String(fret));if(value===null)return;remember();score.annotations.push({type:'barre',...range,text:`C.${Math.max(1,Number(value)||5)}`});render(); });
 $('#undo').addEventListener('click', () => { if(!undoStack.length)return;score=undoStack.pop();syncMetadataInputs();updateControls();render(); });
-$('#clear').addEventListener('click', () => { remember();score.measures=[createMeasure()];score.annotations=[];score.selection={measure:0,voice:score.activeVoice,noteId:null,rangeEnd:null};render(); });
+$('#clear').addEventListener('click', () => { remember();score.measures=[createMeasure()];score.annotations=[];score.selection={measure:0,voice:score.activeVoice,noteId:null,source:'staff',rangeEnd:null};render(); });
 $('#page').addEventListener('change', (e) => { score.page=e.target.value;render(); });
 $('#instrument').addEventListener('change', (e) => { score.instrument=e.target.value;render(); });
+$('#timeSignature').addEventListener('change', (e) => { const [beats,beatType]=e.target.value.split('/').map(Number);score.timeSignature={beats,beatType};render(); });
 ['title','lyricist','composer'].forEach((key) => $(`#${key}`).addEventListener('input', (e) => { score.metadata[key]=e.target.value;render(); }));
 $('#xmlExport').addEventListener('click', () => download(`${score.metadata.title||'score'}.musicxml`,toMusicXml(),'application/vnd.recordare.musicxml+xml'));
 $('#xmlImport').addEventListener('change', async (e) => { try{const file=e.target.files[0];if(file)importMusicXml(await file.text());}catch(err){alert(err.message);}e.target.value=''; });
@@ -624,7 +642,11 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'Period' || e.code === 'NumpadDecimal') { e.preventDefault();$('#dot').click();return; }
   if (/^Digit\d$/.test(e.code) || /^Numpad\d$/.test(e.code)) { e.preventDefault(); changeFret(e.code.at(-1)); return; }
   if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') { e.preventDefault(); moveSelection(e.code==='ArrowLeft'?-1:1); }
-  else if (e.code === 'ArrowUp' || e.code === 'ArrowDown') { e.preventDefault(); transposeSelected(e.code==='ArrowUp'?1:-1,e.ctrlKey); }
+  else if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
+    e.preventDefault();
+    if(score.selection.source==='tab' && !e.ctrlKey) moveTabAcrossStrings(e.code==='ArrowUp'?-1:1);
+    else transposeSelected(e.code==='ArrowUp'?1:-1,e.ctrlKey);
+  }
   else if (e.code === 'Enter') {
     e.preventDefault(); remember();
     const index = score.selection.measure;

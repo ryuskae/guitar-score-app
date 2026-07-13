@@ -8,6 +8,8 @@ const $ = (s) => document.querySelector(s);
 const scoreSvg = $('#score');
 const sheet = $('#sheet');
 const status = $('#status');
+const STAFF_LINE_GAP = 15;
+const STAFF_HEIGHT = STAFF_LINE_GAP * 4;
 const TAB_LINE_GAP = 12;
 const TAB_HEIGHT = TAB_LINE_GAP * 5;
 const TAB_VOICE_OFFSET = [0, 7, -7, 13];
@@ -19,7 +21,8 @@ let graceMode = false;
 let fretBuffer = '';
 let undoStack = [];
 
-const PITCH_BY_CODE = { KeyA: 69, KeyB: 71, KeyC: 60, KeyD: 62, KeyE: 64, KeyF: 65, KeyG: 67 };
+// Keyboard letters enter the lower guitar octave by default: C3–B3.
+const PITCH_BY_CODE = { KeyA: 57, KeyB: 59, KeyC: 48, KeyD: 50, KeyE: 52, KeyF: 53, KeyG: 55 };
 const VOICE_COLORS = ['검정', '파랑', '빨강', '초록'];
 
 function svg(tag, attrs = {}, parent = scoreSvg) {
@@ -93,16 +96,16 @@ function pitchY(midi, baseY) {
   const pitchClass = ((written % 12) + 12) % 12;
   const diatonic = octave * 7 + DIATONIC_STEP[pitchClass];
   const bottomLineE4 = 4 * 7 + 2;
-  return baseY + 32 - (diatonic - bottomLineE4) * 4;
+  return baseY + STAFF_HEIGHT - (diatonic - bottomLineE4) * (STAFF_LINE_GAP / 2);
 }
 
 function drawLedgerLines(x, y, staffY, group) {
-  const top = staffY, bottom = staffY + 32;
-  if (y <= top - 8) for (let yy = top - 8; yy >= y - 1; yy -= 8) svg('line', { x1:x-9, y1:yy, x2:x+9, y2:yy, class:'ledger-line' }, group);
-  if (y >= bottom + 8) for (let yy = bottom + 8; yy <= y + 1; yy += 8) svg('line', { x1:x-9, y1:yy, x2:x+9, y2:yy, class:'ledger-line' }, group);
+  const top = staffY, bottom = staffY + STAFF_HEIGHT;
+  if (y <= top - STAFF_LINE_GAP) for (let yy = top - STAFF_LINE_GAP; yy >= y - 1; yy -= STAFF_LINE_GAP) svg('line', { x1:x-10, y1:yy, x2:x+10, y2:yy, class:'ledger-line' }, group);
+  if (y >= bottom + STAFF_LINE_GAP) for (let yy = bottom + STAFF_LINE_GAP; yy <= y + 1; yy += STAFF_LINE_GAP) svg('line', { x1:x-10, y1:yy, x2:x+10, y2:yy, class:'ledger-line' }, group);
 }
 
-function drawNote(note, measure, measureIndex, voice, x, staffY, tabY, group) {
+function drawNote(note, measure, measureIndex, voice, x, staffY, tabY, group, beamLevel = 0) {
   const selected = score.selection.noteId === note.id;
   const inactive = voice !== score.activeVoice;
   const cls = `voice-${voice} ${selected ? 'selected' : ''} ${inactive ? 'inactive-voice' : ''}`;
@@ -116,14 +119,14 @@ function drawNote(note, measure, measureIndex, voice, x, staffY, tabY, group) {
     const scale = note.grace ? .7 : 1;
     const stemUp = voice % 2 === 0;
     const stemX = x + (stemUp ? 5 : -5) * scale;
-    const stemEndY = y + (stemUp ? -27 : 27) * scale;
-    svg('ellipse', { cx:x, cy:y, rx:6*scale, ry:4.3*scale, transform:`rotate(-18 ${x} ${y})`, class:'notehead' }, g);
+    const stemEndY = y + (stemUp ? -45 : 45) * scale;
+    svg('ellipse', { cx:x, cy:y, rx:7*scale, ry:5*scale, transform:`rotate(-18 ${x} ${y})`, class:'notehead' }, g);
     if (note.duration < 32) svg('line', { x1:stemX, y1:y, x2:stemX, y2:stemEndY, class:'stem' }, g);
-    if (note.duration <= 4) svg('path', { d:stemUp?`M${stemX},${stemEndY} q11,6 2,15`:`M${stemX},${stemEndY} q-11,-6 -2,-15`, fill:'none', class:'stem' }, g);
-    if (note.duration <= 2) svg('path', { d:stemUp?`M${stemX},${stemEndY+7} q11,6 2,15`:`M${stemX},${stemEndY-7} q-11,-6 -2,-15`, fill:'none', class:'stem' }, g);
-    if (note.dotted) svg('circle', { cx:x+10, cy:y, r:1.8, class:'notehead' }, g);
+    if (note.duration <= 4 && beamLevel < 1) svg('path', { d:stemUp?`M${stemX},${stemEndY} q13,7 2,18`:`M${stemX},${stemEndY} q-13,-7 -2,-18`, fill:'none', class:'stem' }, g);
+    if (note.duration <= 2 && beamLevel < 2) svg('path', { d:stemUp?`M${stemX},${stemEndY+9} q13,7 2,18`:`M${stemX},${stemEndY-9} q-13,-7 -2,-18`, fill:'none', class:'stem' }, g);
+    if (note.dotted) svg('circle', { cx:x+12, cy:y, r:2, class:'notehead' }, g);
   }
-  svg('rect', { x:x-13, y:staffY-2, width:26, height:58, class:'hit' }, g)
+  svg('rect', { x:x-15, y:staffY-12, width:30, height:STAFF_HEIGHT+24, class:'hit' }, g)
     .addEventListener('click', (e) => { e.stopPropagation(); setSelection(measureIndex, voice, note.id, e.shiftKey); });
 
   if (!note.rest && score.instrument !== 'piano') {
@@ -136,6 +139,58 @@ function drawNote(note, measure, measureIndex, voice, x, staffY, tabY, group) {
     svg('text', { x:tabX, y:ty+.5, class:'tab-number', text:label }, tg);
     svg('rect', { x:tabX-13, y:ty-11, width:26, height:22, class:'hit' }, tg)
       .addEventListener('click', (e) => { e.stopPropagation(); setSelection(measureIndex, voice, note.id, e.shiftKey); });
+  }
+}
+
+function beamData(measure, voice) {
+  const levels = new Map();
+  const groups = [];
+  let tick = 0, current = [], beat = null;
+  const flush = () => {
+    if (current.length > 1) {
+      current.forEach(({note}) => levels.set(note.id, 1));
+      groups.push(current);
+      let sixteenths=[];
+      const flushSecondary=()=>{ if(sixteenths.length>1) sixteenths.forEach(({note})=>levels.set(note.id,2)); sixteenths=[]; };
+      current.forEach((item) => {
+        if (item.note.duration <= 2) sixteenths.push(item); else flushSecondary();
+      });
+      flushSecondary();
+    }
+    current=[]; beat=null;
+  };
+  for (const note of measure.voices[voice]) {
+    const noteBeat = Math.floor(tick / 8);
+    if (note.rest || note.duration > 4 || (beat !== null && noteBeat !== beat)) flush();
+    if (!note.rest && note.duration <= 4) {
+      if (beat === null) beat=noteBeat;
+      current.push({note,tick});
+    }
+    tick += durationTicks(note);
+  }
+  flush();
+  return { levels, groups };
+}
+
+function drawBeams(groups, positions, voice, group) {
+  const stemUp = voice % 2 === 0;
+  const endpoint = (item, level = 0) => {
+    const position=positions.get(item.note.id);
+    return { x:position.x+(stemUp?5:-5), y:position.y+(stemUp?-45:45)+(stemUp?-1:1)*level*9 };
+  };
+  for (const notes of groups) {
+    const first=endpoint(notes[0]), last=endpoint(notes.at(-1));
+    svg('line',{x1:first.x,y1:first.y,x2:last.x,y2:last.y,class:'beam'},group);
+    let secondary=[];
+    const flushSecondary=()=>{
+      if(secondary.length>1) {
+        const a=endpoint(secondary[0],1),b=endpoint(secondary.at(-1),1);
+        svg('line',{x1:a.x,y1:a.y,x2:b.x,y2:b.y,class:'beam secondary-beam'},group);
+      }
+      secondary=[];
+    };
+    notes.forEach((item)=>{ if(item.note.duration<=2) secondary.push(item); else flushSecondary(); });
+    flushSecondary();
   }
 }
 
@@ -224,37 +279,43 @@ function render() {
   const layouts = new Map();
   sys.forEach((items, systemIndex) => {
     const y = top + systemIndex * systemHeight;
-    const staffY = y + 24, tabY = y + 103;
+    const staffY = y + 24, tabY = staffY + STAFF_HEIGHT + 47;
     const left = 18, usable = width - 36;
     const measureWidth = usable / items.length;
-    svg('text', { x:left+6, y:staffY+29, text:'𝄞', 'font-size':39, 'font-family':'serif' });
+    svg('text', { x:left+5, y:staffY+50, text:'𝄞', 'font-size':56, 'font-family':'serif' });
     const piano = score.instrument === 'piano';
-    svg('text', { x:left+(piano?6:5), y:tabY+(piano?29:27), text:piano?'𝄢':'TAB', 'font-size':piano?36:11, 'font-family':'serif', 'font-weight':700 });
-    for (let line = 0; line < 5; line++) svg('line', { x1:left, y1:staffY+line*8, x2:left+usable, y2:staffY+line*8, class:'staff-line' });
-    for (let line = 0; line < (piano?5:6); line++) svg('line', { x1:left, y1:tabY+line*(piano?8:TAB_LINE_GAP), x2:left+usable, y2:tabY+line*(piano?8:TAB_LINE_GAP), class:piano?'staff-line':'tab-line' });
+    if (piano) svg('text', { x:left+5, y:tabY+50, text:'𝄢', 'font-size':52, 'font-family':'serif', 'font-weight':700 });
+    else ['T','A','B'].forEach((letter, i) => svg('text', { x:left+6, y:tabY+18+i*16, text:letter, 'font-size':11, 'font-family':'serif', 'font-weight':700 }));
+    for (let line = 0; line < 5; line++) svg('line', { x1:left, y1:staffY+line*STAFF_LINE_GAP, x2:left+usable, y2:staffY+line*STAFF_LINE_GAP, class:'staff-line' });
+    for (let line = 0; line < (piano?5:6); line++) svg('line', { x1:left, y1:tabY+line*(piano?STAFF_LINE_GAP:TAB_LINE_GAP), x2:left+usable, y2:tabY+line*(piano?STAFF_LINE_GAP:TAB_LINE_GAP), class:piano?'staff-line':'tab-line' });
     items.forEach(({ measure, index }, localIndex) => {
       const x = left + localIndex * measureWidth;
       const noteLeft = localIndex === 0 ? 58 : 25;
       const noteWidth = measureWidth - noteLeft - 14;
       layouts.set(index, { x, width:measureWidth, noteLeft, noteWidth, staffY, tabY, system:systemIndex });
-      if (score.selection.measure === index && !score.selection.noteId) svg('rect', { x, y:staffY-7, width:measureWidth, height:tabY+TAB_HEIGHT+8-staffY, class:'selected-measure' });
-      svg('rect', { x, y:staffY-9, width:measureWidth, height:tabY+TAB_HEIGHT+13-staffY, class:'measure-hit' })
+      const lowerHeight=piano?STAFF_HEIGHT:TAB_HEIGHT;
+      if (score.selection.measure === index && !score.selection.noteId) svg('rect', { x, y:staffY-7, width:measureWidth, height:tabY+lowerHeight+8-staffY, class:'selected-measure' });
+      svg('rect', { x, y:staffY-9, width:measureWidth, height:tabY+lowerHeight+13-staffY, class:'measure-hit' })
         .addEventListener('click', (e) => { e.stopPropagation(); setSelection(index, score.activeVoice, null, e.shiftKey); });
-      svg('line', { x1:x, y1:staffY, x2:x, y2:staffY+32, class:'barline' });
-      svg('line', { x1:x, y1:tabY, x2:x, y2:tabY+(piano?32:TAB_HEIGHT), class:'barline' });
+      svg('line', { x1:x, y1:staffY, x2:x, y2:staffY+STAFF_HEIGHT, class:'barline' });
+      svg('line', { x1:x, y1:tabY, x2:x, y2:tabY+(piano?STAFF_HEIGHT:TAB_HEIGHT), class:'barline' });
       svg('text', { x:x+5, y:staffY-5, text:String(index+1), 'font-size':9, fill:'#65718a' });
       for (let voice = 0; voice < measure.voices.length; voice++) {
+        const beam=beamData(measure,voice);
+        const positions=new Map();
         measure.voices[voice].forEach((note) => {
           const tick = notePosition(note, measure, voice);
           const nx = x + noteLeft + (tick / MEASURE_TICKS) * noteWidth;
-          drawNote(note, measure, index, voice, nx, staffY, tabY, scoreSvg);
+          positions.set(note.id,{x:nx,y:pitchY(note.midi,staffY)});
+          drawNote(note, measure, index, voice, nx, staffY, tabY, scoreSvg, beam.levels.get(note.id)||0);
         });
+        drawBeams(beam.groups,positions,voice,scoreSvg);
       }
       if (measure.forceBreakAfter) svg('text', { x:x+measureWidth-14, y:staffY-5, text:'↵', class:'break-mark' });
     });
     const end = left + usable;
-    svg('line', { x1:end, y1:staffY, x2:end, y2:staffY+32, class:'barline' });
-    svg('line', { x1:end, y1:tabY, x2:end, y2:tabY+(piano?32:TAB_HEIGHT), class:'barline' });
+    svg('line', { x1:end, y1:staffY, x2:end, y2:staffY+STAFF_HEIGHT, class:'barline' });
+    svg('line', { x1:end, y1:tabY, x2:end, y2:tabY+(piano?STAFF_HEIGHT:TAB_HEIGHT), class:'barline' });
   });
   drawAnnotations(layouts);
   const entry = selectedEntry();
@@ -324,12 +385,18 @@ function moveSelection(delta) {
   setSelection(next.measureIndex, next.voice, next.note.id);
 }
 
-function moveAcrossStrings(direction) {
+function transposeSelected(direction, octave = false) {
   const entry = selectedEntry(); if (!entry || entry.note.rest) return;
-  const choices = positionsForMidi(entry.note.midi).sort((a,b) => a.string-b.string);
-  const current = choices.findIndex((p) => p.string === entry.note.string);
-  const next = choices[current + direction]; if (!next) return;
-  remember(); entry.note.string = next.string; entry.note.fret = next.fret; render();
+  const nextMidi = entry.note.midi + direction * (octave ? 12 : 1);
+  if (score.instrument === 'piano') {
+    if (nextMidi < 21 || nextMidi > 108) return;
+    remember(); entry.note.midi=nextMidi; render(); return;
+  }
+  const position = positionsForMidi(nextMidi).sort((a,b)=>a.fret-b.fret||a.string-b.string)[0];
+  if (!position) { status.textContent='기타의 연주 가능한 음역을 벗어났습니다.'; return; }
+  remember();
+  entry.note.midi=nextMidi; entry.note.string=position.string; entry.note.fret=position.fret;
+  render();
 }
 
 function changeFret(digit) {
@@ -423,7 +490,7 @@ function scoreImage() {
     clone.setAttribute('xmlns', NS);
     clone.querySelectorAll('.hit,.measure-hit,.selected-measure').forEach((node)=>node.remove());
     const style=document.createElementNS(NS,'style');
-    style.textContent='.staff-line,.ledger-line,.tab-line,.barline{stroke:#111;stroke-width:1}.notehead{fill:#111!important}.stem{stroke:#111!important;stroke-width:1.3;fill:none}.tab-bg{fill:#fff;stroke:none}.tab-number{fill:#111!important;font:bold 14px Arial;text-anchor:middle;dominant-baseline:middle}.inactive-voice{opacity:1}.slur,.tie{fill:none;stroke:#111;stroke-width:1.5}.barre{fill:none;stroke:#111;stroke-width:1.2;stroke-dasharray:5 4}.annotation-text{font:italic 13px serif}.break-mark{display:none}';
+    style.textContent='.staff-line,.ledger-line,.tab-line,.barline{stroke:#111;stroke-width:1}.notehead{fill:#111!important}.stem{stroke:#111!important;stroke-width:1.3;fill:none}.beam{stroke:#111;stroke-width:5}.secondary-beam{stroke-width:3.5}.tab-bg{fill:#fff;stroke:none}.tab-number{fill:#111!important;font:bold 14px Arial;text-anchor:middle;dominant-baseline:middle}.inactive-voice{opacity:1}.slur,.tie{fill:none;stroke:#111;stroke-width:1.5}.barre{fill:none;stroke:#111;stroke-width:1.2;stroke-dasharray:5 4}.annotation-text{font:italic 13px serif}.break-mark{display:none}';
     clone.prepend(style);
     const viewBoxValues=clone.getAttribute('viewBox').trim().split(/\s+/).map(Number);
     const viewBox={width:viewBoxValues[2],height:viewBoxValues[3]};
@@ -557,7 +624,7 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'Period' || e.code === 'NumpadDecimal') { e.preventDefault();$('#dot').click();return; }
   if (/^Digit\d$/.test(e.code) || /^Numpad\d$/.test(e.code)) { e.preventDefault(); changeFret(e.code.at(-1)); return; }
   if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') { e.preventDefault(); moveSelection(e.code==='ArrowLeft'?-1:1); }
-  else if (e.code === 'ArrowUp' || e.code === 'ArrowDown') { e.preventDefault(); moveAcrossStrings(e.code==='ArrowUp'?-1:1); }
+  else if (e.code === 'ArrowUp' || e.code === 'ArrowDown') { e.preventDefault(); transposeSelected(e.code==='ArrowUp'?1:-1,e.ctrlKey); }
   else if (e.code === 'Enter') {
     e.preventDefault(); remember();
     const index = score.selection.measure;

@@ -21,10 +21,10 @@ export function createMeasure() {
 
 export function createScore() {
   return {
-    page: 'A4', instrument: 'classical-guitar',
+    page: 'A4', instrument: 'classical-guitar', timeSignature: { beats: 4, beatType: 4 },
     metadata: { title: '', lyricist: '', composer: '' },
     measures: [createMeasure()], annotations: [], activeVoice: 0,
-    selection: { measure: 0, voice: 0, noteId: null, rangeEnd: null },
+    selection: { measure: 0, voice: 0, noteId: null, source: 'staff', rangeEnd: null },
   };
 }
 
@@ -34,6 +34,16 @@ export function durationTicks(note) {
 
 export function measureTicks(measure, voice) {
   return measure.voices[voice].reduce((sum, note) => sum + durationTicks(note), 0);
+}
+
+export function timeSignatureTicks(timeSignature) {
+  return timeSignature.beats * TICKS_PER_QUARTER * (4 / timeSignature.beatType);
+}
+
+export function groupingTicks(timeSignature) {
+  // In compound meters, notes group by dotted-quarter beats (6/8, 9/8, 12/8).
+  if (timeSignature.beatType === 8 && timeSignature.beats >= 6 && timeSignature.beats % 3 === 0) return TICKS_PER_QUARTER * 1.5;
+  return TICKS_PER_QUARTER * (4 / timeSignature.beatType);
 }
 
 export function noteFromStringFret(string, fret, duration = 8, dotted = false, grace = false) {

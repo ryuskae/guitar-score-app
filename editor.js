@@ -59,7 +59,10 @@ function setSelection(measure, voice, noteId = null, extend = false, source = 's
   if (extend && score.selection.noteId) {
     score.selection.rangeEnd = { measure, voice, noteId };
   } else {
-    score.selection = { measure, voice, noteId, source, rangeEnd: null };
+    const targetMeasure=score.measures[measure];
+    const targetNote=noteId?targetMeasure?.voices[voice]?.find((note)=>note.id===noteId):null;
+    const cursorTick=targetNote?notePosition(targetNote,targetMeasure,voice):Math.min(measureLimit(),measureTicks(targetMeasure,voice));
+    score.selection = { measure, voice, noteId, source, cursorTick, rangeEnd: null };
     score.activeVoice = voice;
   }
   fretBuffer = '';
@@ -96,6 +99,11 @@ function notePosition(note, measure, voice) {
     tick += durationTicks(n);
   }
   return tick;
+}
+
+function noteAtTick(measure,voice,tick){
+  let position=0;
+  return measure.voices[voice].find((note)=>{const match=position===tick;position+=durationTicks(note);return match;})||null;
 }
 
 function measureLimit() { return timeSignatureTicks(score.timeSignature); }
@@ -376,6 +384,7 @@ function drawAnnotations(layouts) {
       if (a.system === b.system){
         const y=barreY(a.system,a.x,b.x);
         svg('text',{x:a.x,y:y+4,class:'annotation-text',text:ann.text});
+        if(ann.start.noteId===ann.end.noteId)continue;
         svg('path',{d:`M${a.x+labelWidth},${y} H${b.x+10} v9`,class:'barre'});
       } else {
         const startBound=bounds.get(a.system),startY=barreY(a.system,a.x,startBound.right);
@@ -396,8 +405,9 @@ function render() {
   scoreSvg.replaceChildren();
   renderedNotes=new Map();
   $('#printTitle').textContent = score.metadata.title;
-  $('#printLyricist').textContent = score.metadata.lyricist ? `작사: ${score.metadata.lyricist}` : '';
-  $('#printComposer').textContent = score.metadata.composer ? `작곡: ${score.metadata.composer}` : '';
+  $('#printLyricist').textContent = score.metadata.lyricist || '';
+  $('#printComposer').textContent = score.metadata.composer || '';
+  sheet.style.setProperty('--score-text-font',score.textFont||'Georgia, serif');
   sheet.dataset.page = score.page;
   const width = score.page === 'Screen' ? 1100 : score.page === 'A3' ? 1000 : 720;
   const sys = systems();
@@ -428,7 +438,7 @@ function render() {
       staff.setContext(context).draw();lower.setContext(context).draw();
       const staffTop=staff.getYForLine(0),staffBottom=staff.getYForLine(4);
       const lowerTop=lower.getYForLine(0),lowerBottom=lower.getYForLine(piano?4:5);
-      layouts.set(index,{x,width:measureWidth,staffY:staffTop,tabY:lowerTop,lowerBottom,system:systemIndex});
+      layouts.set(index,{x,width:measureWidth,staffY:staffTop,tabY:lowerTop,lowerBottom,noteStart:staff.getNoteStartX(),noteEnd:staff.getNoteEndX(),system:systemIndex});
       const staffVoices=[],tabVoices=[],staffById=new Map(),tabById=new Map(),staffBeams=[],tabBeams=[];
       measure.voices.forEach((modelVoice,voiceIndex)=>{
         if(!modelVoice.length)return;
@@ -501,6 +511,17 @@ function render() {
       for(let s=a.system;s<=b.system;s++){const q=bounds.get(s),x1=s===a.system?a.x-13:q.left,x2=s===b.system?b.x+13:q.right;svg('rect',{x:x1,y:q.top,width:Math.max(4,x2-x1),height:q.bottom-q.top,class:'range-selection'});}
     }
   }
+  if(!score.selection.noteId){
+    const layout=layouts.get(score.selection.measure);
+    if(layout){
+      const cursorColors=['#d97706','#2368c4','#b33a3a','#15805f'];
+      const color=cursorColors[score.activeVoice]||cursorColors[0];
+      const tick=Math.max(0,Math.min(measureLimit(),score.selection.cursorTick??0));
+      const cursorX=layout.noteStart+(tick/measureLimit())*(layout.noteEnd-layout.noteStart);
+      svg('line',{x1:cursorX,y1:layout.staffY-9,x2:cursorX,y2:layout.lowerBottom+8,class:'voice-cursor',stroke:color});
+      svg('path',{d:`M${cursorX-5},${layout.staffY-13} H${cursorX+5} L${cursorX},${layout.staffY-7} Z`,class:'voice-cursor-head',fill:color});
+    }
+  }
   // Interaction rectangles are rebuilt from VexFlow's final, rhythm-aligned positions.
   selectionOrder().forEach(({note,measure,voice})=>{
     const p=renderedNotes.get(note.id),layout=layouts.get(measure);if(!p||!layout)return;
@@ -514,7 +535,7 @@ function render() {
   const entry = selectedEntry();
   status.textContent = entry
     ? `성부 ${entry.voice+1}(${VOICE_COLORS[entry.voice]}) · ${entry.measureIndex+1}마디 · ${entry.note.string}번 줄 ${entry.note.fret}프렛 · MIDI ${entry.note.midi}`
-    : `성부 ${score.activeVoice+1}(${VOICE_COLORS[score.activeVoice]}) · ${score.selection.measure+1}마디 선택`;
+    : `성부 ${score.activeVoice+1}(${VOICE_COLORS[score.activeVoice]}) · ${score.selection.measure+1}마디 · ${Number((((score.selection.cursorTick??0)/(8*(4/score.timeSignature.beatType)))+1).toFixed(2))}박 위치`;
 }
 
 function updateControls() {
@@ -535,31 +556,51 @@ function stringsUsedAtTick(measure, excludedVoice, targetTick) {
   return used;
 }
 
-function bestPosition(midi, measure=null, voice=score.activeVoice) {
+function bestPosition(midi, measure=null, voice=score.activeVoice, targetTick=null) {
   const choices = positionsForMidi(midi);
   const ordered=choices.sort((a,b) => a.fret-b.fret || a.string-b.string);
   if(measure){
-    const occupied=stringsUsedAtTick(measure,voice,measureTicks(measure,voice));
+    const occupied=stringsUsedAtTick(measure,voice,targetTick??measureTicks(measure,voice));
     const alternative=ordered.find((position)=>!occupied.has(position.string));
     if(alternative)return alternative;
   }
   return ordered[0] || { string:1, fret:Math.max(0,midi-TUNING[0]) };
 }
 
+function appendRestsToTick(measure,voice,targetTick){
+  let gap=targetTick-measureTicks(measure,voice);
+  for(const value of [32,16,8,4,2,1]){
+    while(gap>=value){const rest=noteFromStringFret(1,0,value,false,false);rest.rest=true;measure.voices[voice].push(rest);gap-=value;}
+  }
+}
+
 function addNote(midi) {
-  remember();
   let measureIndex = score.selection.measure;
   let measure = score.measures[measureIndex];
+  const cursorInsert=!score.selection.noteId&&Number.isFinite(score.selection.cursorTick);
+  const targetTick=cursorInsert?Math.max(0,Math.min(measureLimit(),score.selection.cursorTick)):measureTicks(measure,score.activeVoice);
+  const newTicks=duration*(dotted?1.5:1);
+  if(cursorInsert&&Math.max(measureTicks(measure,score.activeVoice),targetTick)+newTicks>measureLimit()){
+    showMeasureWarning(measureIndex);return;
+  }
+  remember();
   if (measureTicks(measure, score.activeVoice) + duration * (dotted ? 1.5 : 1) > measureLimit()) {
     measureIndex++;
     if (!score.measures[measureIndex]) score.measures.push(createMeasure());
     measure = score.measures[measureIndex];
   }
-  const pos = bestPosition(midi,measure,score.activeVoice);
+  if(cursorInsert&&measureIndex===score.selection.measure)appendRestsToTick(measure,score.activeVoice,targetTick);
+  const insertionTick=cursorInsert&&measureIndex===score.selection.measure?targetTick:measureTicks(measure,score.activeVoice);
+  const pos = bestPosition(midi,measure,score.activeVoice,insertionTick);
   const note = noteFromStringFret(pos.string, pos.fret, duration, dotted, graceMode);
   note.rest = restMode;
-  measure.voices[score.activeVoice].push(note);
-  score.selection = { measure:measureIndex, voice:score.activeVoice, noteId:note.id, source:'staff', rangeEnd:null };
+  const voice=measure.voices[score.activeVoice];
+  if(cursorInsert&&measureIndex===score.selection.measure&&insertionTick<measureTicks(measure,score.activeVoice)){
+    let tick=0,index=voice.length;
+    for(let i=0;i<voice.length;i++){if(tick>=insertionTick){index=i;break;}tick+=durationTicks(voice[i]);}
+    voice.splice(index,0,note);
+  }else voice.push(note);
+  score.selection = { measure:measureIndex, voice:score.activeVoice, noteId:note.id, source:'staff', cursorTick:insertionTick, rangeEnd:null };
   if (measureTicks(measure, score.activeVoice) >= measureLimit() && measureIndex === score.measures.length - 1) score.measures.push(createMeasure());
   graceMode = false;
   updateControls(); render();
@@ -611,6 +652,16 @@ function moveSelection(delta) {
   setSelection(next.measureIndex, next.voice, next.note.id, false, score.selection.source || 'staff');
 }
 
+function moveVoiceCursor(direction){
+  const step=duration*(dotted?1.5:1);
+  let measureIndex=score.selection.measure,tick=(score.selection.cursorTick??0)+direction*step;
+  if(tick<0&&measureIndex>0){measureIndex--;tick=Math.max(0,measureLimit()-step);}
+  else if(tick>measureLimit()&&measureIndex<score.measures.length-1){measureIndex++;tick=0;}
+  tick=Math.max(0,Math.min(measureLimit(),tick));
+  score.selection={measure:measureIndex,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:tick,rangeEnd:null};
+  render();
+}
+
 function transposeSelected(direction, octave = false) {
   const entry = selectedEntry(); if (!entry || entry.note.rest) return;
   const nextMidi = entry.note.midi + direction * (octave ? 12 : 1);
@@ -657,7 +708,7 @@ function insertMeasureAfterSelection() {
     if(annotation.start.measure>after)annotation.start.measure++;
     if(annotation.end.measure>after)annotation.end.measure++;
   });
-  score.selection={measure:after+1,voice:score.activeVoice,noteId:null,source:'staff',rangeEnd:null};
+  score.selection={measure:after+1,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:0,rangeEnd:null};
   render();
 }
 
@@ -781,11 +832,12 @@ async function exportPdf() {
       const canvas=document.createElement('canvas');canvas.width=canvasWidth;canvas.height=canvasHeight;
       const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,canvasWidth,canvasHeight);
       if(slice.first&&hasMetadata) {
-        ctx.fillStyle='#111';ctx.textAlign='center';ctx.font=`bold ${Math.round(canvasWidth*.035)}px serif`;
+        const pdfFont=score.textFont||'Georgia, serif';
+        ctx.fillStyle='#111';ctx.textAlign='center';ctx.font=`bold ${Math.round(canvasWidth*.035)}px ${pdfFont}`;
         ctx.fillText(score.metadata.title||'',canvasWidth/2,Math.round(canvasHeight*.05));
-        ctx.font=`${Math.round(canvasWidth*.018)}px serif`;
-        ctx.textAlign='left';ctx.fillText(score.metadata.lyricist?`작사: ${score.metadata.lyricist}`:'',margin,Math.round(canvasHeight*.085));
-        ctx.textAlign='right';ctx.fillText(score.metadata.composer?`작곡: ${score.metadata.composer}`:'',canvasWidth-margin,Math.round(canvasHeight*.085));
+        ctx.font=`${Math.round(canvasWidth*.018)}px ${pdfFont}`;
+        ctx.textAlign='left';ctx.fillText(score.metadata.lyricist||'',margin,Math.round(canvasHeight*.085));
+        ctx.textAlign='right';ctx.fillText(score.metadata.composer||'',canvasWidth-margin,Math.round(canvasHeight*.085));
       }
       ctx.drawImage(source.image,0,slice.sourceY,source.width,slice.height,margin,slice.top,contentWidth,slice.height*scale);
       jpegs.push(jpegBytes(canvas.toDataURL('image/jpeg',.94)));
@@ -840,6 +892,7 @@ function syncMetadataInputs() {
   ['title','lyricist','composer'].forEach((key) => { $(`#${key}`).value = score.metadata[key] || ''; });
   $('#page').value = score.page;
   $('#instrument').value = score.instrument;
+  $('#textFont').value = score.textFont||'Georgia, serif';
   $('#timeSignature').value = `${score.timeSignature.beats}/${score.timeSignature.beatType}`;
 }
 
@@ -858,7 +911,13 @@ $('#dot').addEventListener('click', () => {
   updateControls();render();
 });
 $('#rest').addEventListener('click', () => { restMode=!restMode; updateControls(); });
-$('#voice').addEventListener('click', () => { score.activeVoice=(score.activeVoice+1)%4; score.selection.voice=score.activeVoice; score.selection.noteId=null; updateControls();render(); });
+$('#voice').addEventListener('click', () => {
+  const entry=selectedEntry();
+  const cursorTick=entry?notePosition(entry.note,entry.measure,entry.voice):(score.selection.cursorTick??0);
+  score.activeVoice=(score.activeVoice+1)%4;
+  score.selection={measure:score.selection.measure,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:Math.min(measureLimit(),cursorTick),rangeEnd:null};
+  updateControls();render();
+});
 $('#grace').addEventListener('click', () => { const e=selectedEntry();if(e){remember();e.note.grace=!e.note.grace;}else graceMode=!graceMode;updateControls();render(); });
 $('#tie').addEventListener('click', () => addAnnotation('tie'));
 $('#slur').addEventListener('click', () => addAnnotation('slur'));
@@ -869,9 +928,10 @@ $('#barre').addEventListener('click', () => {
   remember();score.annotations.push({type:'barre',...range,text:`C.${Math.max(1,Math.min(30,Number(value)||1))}`});render();
 });
 $('#undo').addEventListener('click', () => { if(!undoStack.length)return;score=undoStack.pop();syncMetadataInputs();updateControls();render(); });
-$('#clear').addEventListener('click', () => { remember();score.measures=[createMeasure()];score.annotations=[];score.selection={measure:0,voice:score.activeVoice,noteId:null,source:'staff',rangeEnd:null};render(); });
+$('#clear').addEventListener('click', () => { remember();score.measures=[createMeasure()];score.annotations=[];score.selection={measure:0,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:0,rangeEnd:null};render(); });
 $('#page').addEventListener('change', (e) => { score.page=e.target.value;render(); });
 $('#instrument').addEventListener('change', (e) => { score.instrument=e.target.value;render(); });
+$('#textFont').addEventListener('change', (e) => { score.textFont=e.target.value;render(); });
 $('#timeSignature').addEventListener('change', (e) => { const [beats,beatType]=e.target.value.split('/').map(Number);score.timeSignature={beats,beatType};render(); });
 ['title','lyricist','composer'].forEach((key) => $(`#${key}`).addEventListener('input', (e) => { score.metadata[key]=e.target.value;render(); }));
 $('#xmlExport').addEventListener('click', () => download(`${score.metadata.title||'score'}.musicxml`,toMusicXml(),'application/vnd.recordare.musicxml+xml'));
@@ -893,7 +953,11 @@ document.addEventListener('keydown', (e) => {
     if(durationByDigit[digit]){e.preventDefault();duration=durationByDigit[digit];updateControls();return;}
   }
   if(e.code==='Tab'){e.preventDefault();insertMeasureAfterSelection();return;}
-  if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') { e.preventDefault(); moveSelection(e.code==='ArrowLeft'?-1:1); }
+  if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+    e.preventDefault();
+    if(score.selection.noteId)moveSelection(e.code==='ArrowLeft'?-1:1);
+    else moveVoiceCursor(e.code==='ArrowLeft'?-1:1);
+  }
   else if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
     e.preventDefault();
     if(score.selection.source==='tab' && !e.ctrlKey) moveTabAcrossStrings(e.code==='ArrowUp'?-1:1);

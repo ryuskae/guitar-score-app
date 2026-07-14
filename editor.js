@@ -8,6 +8,7 @@ const $ = (s) => document.querySelector(s);
 const scoreSvg = $('#score');
 const sheet = $('#sheet');
 const status = $('#status');
+const VF = window.Vex?.Flow;
 const STAFF_LINE_GAP = 15;
 const STAFF_HEIGHT = STAFF_LINE_GAP * 4;
 const TAB_LINE_GAP = 12;
@@ -23,6 +24,7 @@ let undoStack = [];
 let dragAnchor = null;
 let dragMoved = false;
 let ignoreNextClick = false;
+let renderedNotes = new Map();
 
 // Keyboard letters enter the lower guitar octave by default: C3–B3.
 const PITCH_BY_CODE = { KeyA: 57, KeyB: 59, KeyC: 48, KeyD: 50, KeyE: 52, KeyF: 53, KeyG: 55 };
@@ -267,19 +269,44 @@ function drawBeams(groups, positions, voice, group, endpoints) {
   }
 }
 
-function endpointFor(ref, layouts) {
+function endpointFor(ref) {
   if (!ref) return null;
-  const layout = layouts.get(ref.measure);
-  const measure = score.measures[ref.measure];
-  const note = measure?.voices[ref.voice]?.find((n) => n.id === ref.noteId);
-  if (!layout || !note) return null;
-  const tick = notePosition(note, measure, ref.voice);
-  return {
-    x: layout.x + layout.noteLeft + (tick / measureLimit()) * layout.noteWidth,
-    noteY: pitchY(note.midi, layout.staffY), tabX:layout.x+layout.noteLeft+(tick/measureLimit())*layout.noteWidth+TAB_VOICE_OFFSET[ref.voice],
-    tabNoteY:layout.tabY+(note.string-1)*TAB_LINE_GAP,
-    staffY:layout.staffY, tabY:layout.tabY, system:layout.system,
-  };
+  return renderedNotes.get(ref.noteId) || null;
+}
+
+const VEX_DURATION = { 32:'w', 16:'h', 8:'q', 4:'8', 2:'16', 1:'32' };
+const VEX_NAMES = ['c','c#','d','d#','e','f','f#','g','g#','a','a#','b'];
+
+function vexDuration(note, rest=false) {
+  const base = VEX_DURATION[note.duration] || 'q';
+  return `${base}${note.dotted?'d':''}${rest?'r':''}`;
+}
+
+function vexKey(midi) {
+  const value=writtenMidi(midi), pc=((value%12)+12)%12, octave=Math.floor(value/12)-1;
+  return `${VEX_NAMES[pc]}/${octave}`;
+}
+
+function selectionOrder() {
+  const entries=[];
+  score.measures.forEach((measure, measureIndex) => measure.voices.forEach((voice, voiceIndex) => {
+    let tick=0;
+    voice.forEach((note) => { entries.push({note,measure:measureIndex,voice:voiceIndex,tick});tick+=durationTicks(note); });
+  }));
+  return entries.sort((a,b)=>a.measure-b.measure||a.tick-b.tick||a.voice-b.voice);
+}
+
+function selectedIds() {
+  const ids=new Set();
+  if(!score.selection.noteId) return ids;
+  if(!score.selection.rangeEnd){ids.add(score.selection.noteId);return ids;}
+  const ordered=selectionOrder();
+  let a=ordered.findIndex((item)=>item.note.id===score.selection.noteId);
+  let b=ordered.findIndex((item)=>item.note.id===score.selection.rangeEnd.noteId);
+  if(a<0||b<0)return ids;
+  if(a>b)[a,b]=[b,a];
+  ordered.slice(a,b+1).forEach((item)=>ids.add(item.note.id));
+  return ids;
 }
 
 function drawAnnotations(layouts) {
@@ -290,7 +317,7 @@ function drawAnnotations(layouts) {
     bounds.set(layout.system, current);
   }
   for (const ann of score.annotations) {
-    let a = endpointFor(ann.start, layouts), b = endpointFor(ann.end, layouts);
+    let a = endpointFor(ann.start), b = endpointFor(ann.end);
     if (!a || !b) continue;
     if (a.system > b.system || (a.system === b.system && a.x > b.x)) [a,b] = [b,a];
     if (ann.type === 'slur' || ann.type === 'tie') {
@@ -323,11 +350,12 @@ function drawAnnotations(layouts) {
         drawOnSystem(b.system, bounds.get(b.system).left+3, b.x);
       }
     } else if (ann.type === 'barre') {
-      const y = bounds.get(a.system).staffY - 12;
-      svg('text', { x:a.x, y:y-4, class:'annotation-text', text:ann.text });
-      if (a.system === b.system) svg('path', { d:`M${a.x+28},${y} H${b.x+10} v9`, class:'barre' });
+      const y = bounds.get(a.system).staffY - 18;
+      svg('text', { x:a.x, y:y+4, class:'annotation-text', text:ann.text });
+      const labelWidth=Math.max(24,ann.text.length*7);
+      if (a.system === b.system) svg('path', { d:`M${a.x+labelWidth},${y} H${b.x+10} v9`, class:'barre' });
       else {
-        svg('path', { d:`M${a.x+28},${y} H${bounds.get(a.system).right-3}`, class:'barre' });
+        svg('path', { d:`M${a.x+labelWidth},${y} H${bounds.get(a.system).right-3}`, class:'barre' });
         for (let system=a.system+1; system<b.system; system++) {
           const bound=bounds.get(system); svg('path', { d:`M${bound.left+3},${bound.staffY-12} H${bound.right-3}`, class:'barre' });
         }
@@ -340,67 +368,113 @@ function drawAnnotations(layouts) {
 
 function render() {
   scoreSvg.replaceChildren();
+  renderedNotes=new Map();
   $('#printTitle').textContent = score.metadata.title;
   $('#printLyricist').textContent = score.metadata.lyricist ? `작사: ${score.metadata.lyricist}` : '';
   $('#printComposer').textContent = score.metadata.composer ? `작곡: ${score.metadata.composer}` : '';
   sheet.dataset.page = score.page;
   const width = score.page === 'Screen' ? 1100 : score.page === 'A3' ? 1000 : 720;
   const sys = systems();
-  const systemHeight = 210, top = 28;
+  const systemHeight = 245, top = 5;
   scoreSvg.setAttribute('viewBox', `0 0 ${width} ${Math.max(220, top + sys.length * systemHeight)}`);
   scoreSvg.style.height = `${Math.max(220, top + sys.length * systemHeight)}px`;
+  if(!VF){status.textContent='악보 렌더링 라이브러리를 불러오지 못했습니다.';return;}
+  const context=new VF.SVGContext(scoreSvg).resize(width,Math.max(220,top+sys.length*systemHeight));
   const layouts = new Map();
+  const selected=selectedIds();
+  const voiceColors=['#111','#2368c4','#b33a3a','#15805f'];
   sys.forEach((items, systemIndex) => {
-    const y = top + systemIndex * systemHeight;
-    const staffY = y + 24, tabY = staffY + STAFF_HEIGHT + 47;
-    const left = 18, usable = width - 36;
+    const y=top+systemIndex*systemHeight;
+    const left=24, usable=width-48;
     const measureWidth = usable / items.length;
     const piano = score.instrument === 'piano';
-    const lowerHeight = piano ? STAFF_HEIGHT : TAB_HEIGHT;
-    const tabBottom = tabY + lowerHeight;
-    // One square bracket makes the staff and tablature a single guitar part.
-    svg('path', { d:`M${left-1},${staffY-7} H${left-9} V${tabBottom+1} H${left-1}`, class:'system-bracket' });
-    // Guitar clef deliberately extends beyond the five lines, as in published guitar scores.
-    svg('text', { x:left+4, y:staffY+58, text:'𝄞', 'font-size':76, 'font-family':'serif' });
-    if (!piano) svg('text', { x:left+23, y:staffY+80, text:'8', 'font-size':14, 'font-family':'serif', 'text-anchor':'middle' });
-    const timeX=left+58;
-    svg('text', { x:timeX, y:staffY+30, text:String(score.timeSignature.beats), 'font-size':34, 'font-family':'serif', 'text-anchor':'middle' });
-    svg('text', { x:timeX, y:staffY+63, text:String(score.timeSignature.beatType), 'font-size':34, 'font-family':'serif', 'text-anchor':'middle' });
-    if (piano) svg('text', { x:left+5, y:tabY+50, text:'𝄢', 'font-size':52, 'font-family':'serif', 'font-weight':700 });
-    else ['T','A','B'].forEach((letter, i) => svg('text', { x:left+6, y:tabY+18+i*16, text:letter, 'font-size':11, 'font-family':'serif', 'font-weight':700 }));
-    for (let line = 0; line < 5; line++) svg('line', { x1:left, y1:staffY+line*STAFF_LINE_GAP, x2:left+usable, y2:staffY+line*STAFF_LINE_GAP, class:'staff-line' });
-    for (let line = 0; line < (piano?5:6); line++) svg('line', { x1:left, y1:tabY+line*(piano?STAFF_LINE_GAP:TAB_LINE_GAP), x2:left+usable, y2:tabY+line*(piano?STAFF_LINE_GAP:TAB_LINE_GAP), class:piano?'staff-line':'tab-line' });
+    let firstStaff=null,firstLower=null;
     items.forEach(({ measure, index }, localIndex) => {
       const x = left + localIndex * measureWidth;
-      const noteLeft = localIndex === 0 ? 101 : 25;
-      const noteWidth = measureWidth - noteLeft - 14;
-      layouts.set(index, { x, width:measureWidth, noteLeft, noteWidth, staffY, tabY, system:systemIndex });
-      if (score.selection.measure === index && !score.selection.noteId) svg('rect', { x, y:staffY-7, width:measureWidth, height:tabY+lowerHeight+8-staffY, class:'selected-measure' });
-      svg('rect', { x, y:staffY-9, width:measureWidth, height:tabY+lowerHeight+13-staffY, class:'measure-hit' })
-        .addEventListener('click', (e) => { e.stopPropagation(); setSelection(index, score.activeVoice, null, e.shiftKey); });
-      svg('line', { x1:x, y1:staffY, x2:x, y2:staffY+STAFF_HEIGHT, class:'barline' });
-      svg('line', { x1:x, y1:tabY, x2:x, y2:tabY+(piano?STAFF_HEIGHT:TAB_HEIGHT), class:'barline' });
-      svg('text', { x:x+5, y:staffY-5, text:String(index+1), 'font-size':9, fill:'#65718a' });
-      for (let voice = 0; voice < measure.voices.length; voice++) {
-        const beam=beamData(measure,voice);
-        const positions=new Map();
-        measure.voices[voice].forEach((note) => {
-          const tick = notePosition(note, measure, voice);
-          const nx = x + noteLeft + (tick / measureLimit()) * noteWidth;
-          positions.set(note.id,{x:nx,y:pitchY(note.midi,staffY)});
-        });
-        const endpoints=beamGeometry(beam.groups,positions,voice);
-        measure.voices[voice].forEach((note) => {
-          const position=positions.get(note.id);
-          drawNote(note, measure, index, voice, position.x, staffY, tabY, scoreSvg, beam.levels.get(note.id)||0, endpoints.get(note.id));
-        });
-        drawBeams(beam.groups,positions,voice,scoreSvg,endpoints);
+      const staff=new VF.Stave(x,y,measureWidth);
+      const lower=piano?new VF.Stave(x,y+122,measureWidth):new VF.TabStave(x,y+122,measureWidth);
+      if(localIndex===0){
+        staff.addClef('treble','default',piano?undefined:'8vb').addTimeSignature(`${score.timeSignature.beats}/${score.timeSignature.beatType}`);
+        lower.addClef(piano?'bass':'tab');
+        firstStaff=staff;firstLower=lower;
       }
-      if (measure.forceBreakAfter) svg('text', { x:x+measureWidth-14, y:staffY-5, text:'↵', class:'break-mark' });
+      VF.Stave.formatBegModifiers([staff,lower]);
+      staff.setContext(context).draw();lower.setContext(context).draw();
+      const staffTop=staff.getYForLine(0),staffBottom=staff.getYForLine(4);
+      const lowerTop=lower.getYForLine(0),lowerBottom=lower.getYForLine(piano?4:5);
+      layouts.set(index,{x,width:measureWidth,staffY:staffTop,tabY:lowerTop,lowerBottom,system:systemIndex});
+      const staffVoices=[],tabVoices=[],staffById=new Map(),tabById=new Map(),staffBeams=[],tabBeams=[];
+      measure.voices.forEach((modelVoice,voiceIndex)=>{
+        if(!modelVoice.length)return;
+        const direction=voiceIndex%2===0?VF.Stem.UP:VF.Stem.DOWN;
+        const staffNotes=[],tabNotes=[];
+        modelVoice.forEach((note)=>{
+          let staveNote;
+          if(note.grace) staveNote=new VF.GraceNote({keys:[vexKey(note.midi)],duration:'16',slash:true,stemDirection:direction});
+          else staveNote=new VF.StaveNote({keys:[vexKey(note.midi)],duration:vexDuration(note,note.rest),stemDirection:direction});
+          if(!note.rest&&vexKey(note.midi).includes('#'))staveNote.addModifier(new VF.Accidental('#'));
+          if(note.dotted)VF.Dot.buildAndAttach([staveNote],{all:true});
+          staveNote.setStyle({fillStyle:selected.has(note.id)?'#d97706':voiceColors[voiceIndex],strokeStyle:selected.has(note.id)?'#d97706':voiceColors[voiceIndex]});
+          staffNotes.push(staveNote);staffById.set(note.id,staveNote);
+          const tabNote=note.rest?new VF.GhostNote({duration:vexDuration(note)}):new VF.TabNote({positions:[{str:note.string,fret:note.fret}],duration:vexDuration(note),stemDirection:direction},true);
+          if(note.dotted&&!note.rest)VF.Dot.buildAndAttach([tabNote],{all:true});
+          if(!note.rest)tabNote.setStyle({fillStyle:selected.has(note.id)?'#d97706':voiceColors[voiceIndex],strokeStyle:selected.has(note.id)?'#d97706':voiceColors[voiceIndex]});
+          tabNotes.push(tabNote);tabById.set(note.id,tabNote);
+        });
+        const time={num_beats:score.timeSignature.beats,beat_value:score.timeSignature.beatType};
+        const sv=new VF.Voice(time).setMode(VF.Voice.Mode.SOFT).addTickables(staffNotes).setStave(staff);
+        const tv=new VF.Voice(time).setMode(VF.Voice.Mode.SOFT).addTickables(tabNotes).setStave(lower);
+        staffVoices.push(sv);tabVoices.push(tv);
+        const beam=beamData(measure,voiceIndex);
+        beam.groups.forEach((items)=>{
+          const s=items.map(({note})=>staffById.get(note.id)).filter(Boolean);
+          const t=items.map(({note})=>tabById.get(note.id)).filter((item)=>item&&!(item instanceof VF.GhostNote));
+          if(s.length>1)staffBeams.push(new VF.Beam(s,false));
+          if(t.length>1)tabBeams.push(new VF.Beam(t,false));
+        });
+      });
+      const allVoices=[...staffVoices,...tabVoices];
+      if(allVoices.length){
+        const formatter=new VF.Formatter();
+        if(staffVoices.length)formatter.joinVoices(staffVoices);
+        if(tabVoices.length)formatter.joinVoices(tabVoices);
+        const start=Math.max(staff.getNoteStartX(),lower.getNoteStartX());
+        staffVoices.forEach((v)=>v.setStave(staff));tabVoices.forEach((v)=>v.setStave(lower));
+        formatter.format(allVoices,Math.max(30,staff.getNoteEndX()-start-8));
+        staffVoices.forEach((v)=>v.draw(context,staff));tabVoices.forEach((v)=>v.draw(context,lower));
+        staffBeams.forEach((beam)=>beam.setContext(context).draw());tabBeams.forEach((beam)=>beam.setContext(context).draw());
+        measure.voices.forEach((voice,voiceIndex)=>voice.forEach((note)=>{
+          const sn=staffById.get(note.id),tn=tabById.get(note.id);
+          if(!sn)return;
+          const noteX=sn.getAbsoluteX(),noteY=sn.getYs?.()[0]??staffTop+20;
+          const tabX=tn?.getAbsoluteX?.()??noteX,tabNoteY=tn?.getYs?.()[0]??lowerTop;
+          renderedNotes.set(note.id,{x:noteX,noteY,tabX,tabNoteY,staffY:staffTop,tabY:lowerTop,system:systemIndex});
+        }));
+      }
+      svg('text',{x:x+5,y:staffTop-8,text:String(index+1),'font-size':9,fill:'#65718a'});
+      const mh=svg('rect',{x,y:staffTop-10,width:measureWidth,height:lowerBottom-staffTop+20,class:'measure-hit'});
+      mh.addEventListener('click',(e)=>{if(e.target===mh)setSelection(index,score.activeVoice,null,e.shiftKey);});
+      if(measure.forceBreakAfter)svg('text',{x:x+measureWidth-14,y:staffTop-8,text:'↵',class:'break-mark'});
     });
-    const end = left + usable;
-    svg('line', { x1:end, y1:staffY, x2:end, y2:staffY+STAFF_HEIGHT, class:'barline' });
-    svg('line', { x1:end, y1:tabY, x2:end, y2:tabY+(piano?STAFF_HEIGHT:TAB_HEIGHT), class:'barline' });
+    if(firstStaff&&firstLower)new VF.StaveConnector(firstStaff,firstLower).setType('bracket').setContext(context).draw();
+  });
+  // A translucent range makes drag selection unambiguous before applying a barre.
+  if(score.selection.noteId&&score.selection.rangeEnd){
+    let a=endpointFor({noteId:score.selection.noteId}),b=endpointFor(score.selection.rangeEnd);
+    if(a&&b){
+      if(a.system>b.system||(a.system===b.system&&a.x>b.x))[a,b]=[b,a];
+      const bounds=new Map();for(const l of layouts.values()){const q=bounds.get(l.system)||{left:l.x,right:l.x+l.width,top:l.staffY-25,bottom:l.lowerBottom+12};q.left=Math.min(q.left,l.x);q.right=Math.max(q.right,l.x+l.width);bounds.set(l.system,q);}
+      for(let s=a.system;s<=b.system;s++){const q=bounds.get(s),x1=s===a.system?a.x-13:q.left,x2=s===b.system?b.x+13:q.right;svg('rect',{x:x1,y:q.top,width:Math.max(4,x2-x1),height:q.bottom-q.top,class:'range-selection'});}
+    }
+  }
+  // Interaction rectangles are rebuilt from VexFlow's final, rhythm-aligned positions.
+  selectionOrder().forEach(({note,measure,voice})=>{
+    const p=renderedNotes.get(note.id),layout=layouts.get(measure);if(!p||!layout)return;
+    const sh=svg('rect',{x:p.x-13,y:layout.staffY-22,width:26,height:84,class:'hit'});
+    sh.addEventListener('pointerdown',(e)=>beginRangeSelection(e,measure,voice,note.id,'staff'));
+    sh.addEventListener('pointerenter',()=>extendRangeSelection(measure,voice,note.id));
+    sh.addEventListener('click',(e)=>{e.stopPropagation();if(ignoreNextClick){ignoreNextClick=false;return;}setSelection(measure,voice,note.id,e.shiftKey,'staff');});
+    if(score.instrument!=='piano'&&!note.rest){const th=svg('rect',{x:p.tabX-14,y:p.tabNoteY-11,width:28,height:22,class:'hit'});th.addEventListener('pointerdown',(e)=>beginRangeSelection(e,measure,voice,note.id,'tab'));th.addEventListener('pointerenter',()=>extendRangeSelection(measure,voice,note.id));th.addEventListener('click',(e)=>{e.stopPropagation();if(ignoreNextClick){ignoreNextClick=false;return;}setSelection(measure,voice,note.id,e.shiftKey,'tab');});}
   });
   drawAnnotations(layouts);
   const entry = selectedEntry();

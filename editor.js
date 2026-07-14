@@ -25,6 +25,8 @@ let dragAnchor = null;
 let dragMoved = false;
 let ignoreNextClick = false;
 let renderedNotes = new Map();
+let measureWarning = null;
+let warningTimer = null;
 
 // Keyboard letters enter the lower guitar octave by default: C3–B3.
 const PITCH_BY_CODE = { KeyA: 57, KeyB: 59, KeyC: 48, KeyD: 50, KeyE: 52, KeyF: 53, KeyG: 55 };
@@ -97,6 +99,19 @@ function notePosition(note, measure, voice) {
 }
 
 function measureLimit() { return timeSignatureTicks(score.timeSignature); }
+
+function showMeasureWarning(measureIndex, message='마디의 박자 길이를 초과할 수 없습니다.') {
+  measureWarning={measureIndex,message};
+  clearTimeout(warningTimer);
+  render();
+  warningTimer=setTimeout(()=>{measureWarning=null;render();},2600);
+}
+
+function noteFitsMeasure(measure, voice, note, dottedValue=note.dotted, durationValue=note.duration) {
+  const used=measure.voices[voice].reduce((sum,item)=>sum+(item.id===note.id?0:durationTicks(item)),0);
+  const proposed=note.grace?0:durationValue*(dottedValue?1.5:1);
+  return used+proposed<=measureLimit();
+}
 
 function systems() {
   const groups = [];
@@ -350,17 +365,28 @@ function drawAnnotations(layouts) {
         drawOnSystem(b.system, bounds.get(b.system).left+3, b.x);
       }
     } else if (ann.type === 'barre') {
-      const y = bounds.get(a.system).staffY - 18;
-      svg('text', { x:a.x, y:y+4, class:'annotation-text', text:ann.text });
+      const barreY=(system,x1,x2)=>{
+        const bound=bounds.get(system);
+        const tops=[...renderedNotes.values()]
+          .filter((item)=>item.system===system&&item.x>=x1-2&&item.x<=x2+2)
+          .map((item)=>item.topY);
+        return Math.min(bound.staffY-18,(tops.length?Math.min(...tops):bound.staffY)-13);
+      };
       const labelWidth=Math.max(24,ann.text.length*7);
-      if (a.system === b.system) svg('path', { d:`M${a.x+labelWidth},${y} H${b.x+10} v9`, class:'barre' });
-      else {
-        svg('path', { d:`M${a.x+labelWidth},${y} H${bounds.get(a.system).right-3}`, class:'barre' });
+      if (a.system === b.system){
+        const y=barreY(a.system,a.x,b.x);
+        svg('text',{x:a.x,y:y+4,class:'annotation-text',text:ann.text});
+        svg('path',{d:`M${a.x+labelWidth},${y} H${b.x+10} v9`,class:'barre'});
+      } else {
+        const startBound=bounds.get(a.system),startY=barreY(a.system,a.x,startBound.right);
+        svg('text',{x:a.x,y:startY+4,class:'annotation-text',text:ann.text});
+        svg('path', { d:`M${a.x+labelWidth},${startY} H${startBound.right-3}`, class:'barre' });
         for (let system=a.system+1; system<b.system; system++) {
-          const bound=bounds.get(system); svg('path', { d:`M${bound.left+3},${bound.staffY-12} H${bound.right-3}`, class:'barre' });
+          const bound=bounds.get(system),y=barreY(system,bound.left,bound.right);
+          svg('path', { d:`M${bound.left+3},${y} H${bound.right-3}`, class:'barre' });
         }
-        const endBound=bounds.get(b.system);
-        svg('path', { d:`M${endBound.left+3},${endBound.staffY-12} H${b.x+10} v9`, class:'barre' });
+        const endBound=bounds.get(b.system),endY=barreY(b.system,endBound.left,b.x);
+        svg('path', { d:`M${endBound.left+3},${endY} H${b.x+10} v9`, class:'barre' });
       }
     }
   }
@@ -410,13 +436,13 @@ function render() {
         const staffNotes=[],tabNotes=[];
         modelVoice.forEach((note)=>{
           let staveNote;
-          if(note.grace) staveNote=new VF.GraceNote({keys:[vexKey(note.midi)],duration:'16',slash:true,stemDirection:direction});
-          else staveNote=new VF.StaveNote({keys:[vexKey(note.midi)],duration:vexDuration(note,note.rest),stemDirection:direction});
+          if(note.grace) staveNote=new VF.GraceNote({keys:[vexKey(note.midi)],duration:'16',slash:true,stem_direction:direction});
+          else staveNote=new VF.StaveNote({keys:[vexKey(note.midi)],duration:vexDuration(note,note.rest),stem_direction:direction});
           if(!note.rest&&vexKey(note.midi).includes('#'))staveNote.addModifier(new VF.Accidental('#'));
           if(note.dotted)VF.Dot.buildAndAttach([staveNote],{all:true});
           staveNote.setStyle({fillStyle:selected.has(note.id)?'#d97706':voiceColors[voiceIndex],strokeStyle:selected.has(note.id)?'#d97706':voiceColors[voiceIndex]});
           staffNotes.push(staveNote);staffById.set(note.id,staveNote);
-          const tabNote=note.rest?new VF.GhostNote({duration:vexDuration(note)}):new VF.TabNote({positions:[{str:note.string,fret:note.fret}],duration:vexDuration(note),stemDirection:direction},true);
+          const tabNote=note.rest?new VF.GhostNote({duration:vexDuration(note)}):new VF.TabNote({positions:[{str:note.string,fret:note.fret}],duration:vexDuration(note),stem_direction:direction},true);
           if(note.dotted&&!note.rest)VF.Dot.buildAndAttach([tabNote],{all:true});
           if(!note.rest)tabNote.setStyle({fillStyle:selected.has(note.id)?'#d97706':voiceColors[voiceIndex],strokeStyle:selected.has(note.id)?'#d97706':voiceColors[voiceIndex]});
           tabNotes.push(tabNote);tabById.set(note.id,tabNote);
@@ -448,10 +474,18 @@ function render() {
           if(!sn)return;
           const noteX=sn.getAbsoluteX(),noteY=sn.getYs?.()[0]??staffTop+20;
           const tabX=tn?.getAbsoluteX?.()??noteX,tabNoteY=tn?.getYs?.()[0]??lowerTop;
-          renderedNotes.set(note.id,{x:noteX,noteY,tabX,tabNoteY,staffY:staffTop,tabY:lowerTop,system:systemIndex});
+          const stem=sn.getStemExtents?.();
+          const topY=Math.min(noteY,stem?.topY??noteY,stem?.baseY??noteY);
+          const bottomY=Math.max(noteY,stem?.topY??noteY,stem?.baseY??noteY);
+          renderedNotes.set(note.id,{x:noteX,noteY,topY,bottomY,tabX,tabNoteY,staffY:staffTop,tabY:lowerTop,system:systemIndex});
         }));
       }
       svg('text',{x:x+5,y:staffTop-8,text:String(index+1),'font-size':9,fill:'#65718a'});
+      if(measureWarning?.measureIndex===index){
+        const warningWidth=Math.min(measureWidth-12,210),warningX=x+(measureWidth-warningWidth)/2;
+        svg('rect',{x:warningX,y:staffTop-37,width:warningWidth,height:21,rx:5,class:'measure-warning-bg'});
+        svg('text',{x:x+measureWidth/2,y:staffTop-22,text:measureWarning.message,class:'measure-warning-text'});
+      }
       const mh=svg('rect',{x,y:staffTop-10,width:measureWidth,height:lowerBottom-staffTop+20,class:'measure-hit'});
       mh.addEventListener('click',(e)=>{if(e.target===mh)setSelection(index,score.activeVoice,null,e.shiftKey);});
       if(measure.forceBreakAfter)svg('text',{x:x+measureWidth-14,y:staffTop-8,text:'↵',class:'break-mark'});
@@ -491,9 +525,25 @@ function updateControls() {
   document.querySelectorAll('[data-duration]').forEach((b) => b.classList.toggle('active', Number(b.dataset.duration) === duration));
 }
 
-function bestPosition(midi) {
+function stringsUsedAtTick(measure, excludedVoice, targetTick) {
+  const used=new Set();
+  measure.voices.forEach((voice,voiceIndex)=>{
+    if(voiceIndex===excludedVoice)return;
+    let tick=0;
+    voice.forEach((note)=>{if(!note.rest&&tick===targetTick)used.add(note.string);tick+=durationTicks(note);});
+  });
+  return used;
+}
+
+function bestPosition(midi, measure=null, voice=score.activeVoice) {
   const choices = positionsForMidi(midi);
-  return choices.sort((a,b) => a.fret-b.fret || a.string-b.string)[0] || { string:1, fret:Math.max(0,midi-TUNING[0]) };
+  const ordered=choices.sort((a,b) => a.fret-b.fret || a.string-b.string);
+  if(measure){
+    const occupied=stringsUsedAtTick(measure,voice,measureTicks(measure,voice));
+    const alternative=ordered.find((position)=>!occupied.has(position.string));
+    if(alternative)return alternative;
+  }
+  return ordered[0] || { string:1, fret:Math.max(0,midi-TUNING[0]) };
 }
 
 function addNote(midi) {
@@ -505,7 +555,7 @@ function addNote(midi) {
     if (!score.measures[measureIndex]) score.measures.push(createMeasure());
     measure = score.measures[measureIndex];
   }
-  const pos = bestPosition(midi);
+  const pos = bestPosition(midi,measure,score.activeVoice);
   const note = noteFromStringFret(pos.string, pos.fret, duration, dotted, graceMode);
   note.rest = restMode;
   measure.voices[score.activeVoice].push(note);
@@ -528,8 +578,25 @@ function addAnnotation(type) {
   if ((type === 'slur' || type === 'tie') && !score.selection.rangeEnd) {
     const notes = allNotes(score, score.selection.voice);
     const index = notes.findIndex(({note}) => note.id === score.selection.noteId);
-    const next = notes[index + 1];
-    if (!next) { status.textContent = `${type === 'slur' ? '슬러' : '타이'}를 연결할 다음 음표가 없습니다.`; return; }
+    let next = notes[index + 1];
+    if (!next && type === 'tie') {
+      const entry=selectedEntry();
+      if(!entry||entry.note.rest)return;
+      remember();
+      let targetIndex=entry.measureIndex,targetMeasure=entry.measure;
+      if(measureTicks(targetMeasure,entry.voice)+durationTicks(entry.note)>measureLimit()){
+        targetIndex++;
+        if(!score.measures[targetIndex])score.measures.push(createMeasure());
+        targetMeasure=score.measures[targetIndex];
+      }
+      const duplicate=noteFromStringFret(entry.note.string,entry.note.fret,entry.note.duration,entry.note.dotted,false);
+      duplicate.midi=entry.note.midi;
+      targetMeasure.voices[entry.voice].push(duplicate);
+      next={note:duplicate,measure:targetMeasure,measureIndex:targetIndex,voice:entry.voice};
+      range={start:range.start,end:{measure:targetIndex,voice:entry.voice,noteId:duplicate.id}};
+      score.annotations.push({type,...range});render();return;
+    }
+    if (!next) { status.textContent = '슬러를 연결할 다음 음표가 없습니다.'; return; }
     range = { start:range.start, end:{ measure:next.measureIndex, voice:next.voice, noteId:next.note.id } };
   }
   remember();
@@ -580,6 +647,18 @@ function deleteSelected() {
   entry.measure.voices[entry.voice] = entry.measure.voices[entry.voice].filter((n) => n.id !== entry.note.id);
   score.annotations = score.annotations.filter((a) => a.start.noteId !== entry.note.id && a.end.noteId !== entry.note.id);
   score.selection.noteId = null; render();
+}
+
+function insertMeasureAfterSelection() {
+  remember();
+  const after=Math.max(0,Math.min(score.measures.length-1,score.selection.measure));
+  score.measures.splice(after+1,0,createMeasure());
+  score.annotations.forEach((annotation)=>{
+    if(annotation.start.measure>after)annotation.start.measure++;
+    if(annotation.end.measure>after)annotation.end.measure++;
+  });
+  score.selection={measure:after+1,voice:score.activeVoice,noteId:null,source:'staff',rangeEnd:null};
+  render();
 }
 
 function escapeXml(value='') { return value.replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c])); }
@@ -767,7 +846,14 @@ function syncMetadataInputs() {
 document.querySelectorAll('[data-duration]').forEach((button) => button.addEventListener('click', () => { duration = Number(button.dataset.duration); updateControls(); }));
 $('#dot').addEventListener('click', () => {
   const entry=selectedEntry();
-  if(entry){ remember();entry.note.dotted=!entry.note.dotted;dotted=entry.note.dotted; }
+  if(entry){
+    const nextDotted=!entry.note.dotted;
+    if(!noteFitsMeasure(entry.measure,entry.voice,entry.note,nextDotted)){
+      showMeasureWarning(entry.measureIndex);
+      return;
+    }
+    remember();entry.note.dotted=nextDotted;dotted=entry.note.dotted;
+  }
   else dotted=!dotted;
   updateControls();render();
 });
@@ -798,7 +884,15 @@ document.addEventListener('keydown', (e) => {
   if (e.target?.matches?.('input,select,textarea') || $('#helpDialog').open) return;
   if (PITCH_BY_CODE[e.code] != null) { e.preventDefault(); addNote(PITCH_BY_CODE[e.code]); return; }
   if (e.code === 'Period' || e.code === 'NumpadDecimal') { e.preventDefault();$('#dot').click();return; }
-  if (/^Digit\d$/.test(e.code) || /^Numpad\d$/.test(e.code)) { e.preventDefault(); changeFret(e.code.at(-1)); return; }
+  if (/^Digit\d$/.test(e.code) || /^Numpad\d$/.test(e.code)) {
+    const digit=e.code.at(-1);
+    if(score.selection.source==='tab'&&selectedEntry()){
+      e.preventDefault();changeFret(digit);return;
+    }
+    const durationByDigit={1:32,2:16,3:8,4:4,5:2};
+    if(durationByDigit[digit]){e.preventDefault();duration=durationByDigit[digit];updateControls();return;}
+  }
+  if(e.code==='Tab'){e.preventDefault();insertMeasureAfterSelection();return;}
   if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') { e.preventDefault(); moveSelection(e.code==='ArrowLeft'?-1:1); }
   else if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
     e.preventDefault();

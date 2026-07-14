@@ -19,7 +19,7 @@
     #score{width:100%;display:block;overflow:visible}.staff-line,.ledger-line,.tab-line,.barline{stroke:#222;stroke-width:1}.ledger-line{stroke-width:1.2}.tab-line{stroke-width:.8}.notehead{fill:#111}.voice-1 .notehead{fill:#2368c4}.voice-2 .notehead{fill:#b33a3a}.voice-3 .notehead{fill:#15805f}
     .inactive-voice{opacity:.46}.selected .notehead,.selected .stem{filter:drop-shadow(0 0 2px #f59e0b);stroke:#f59e0b;stroke-width:2}.stem{stroke:#111;stroke-width:1.3}.beam{stroke:#111;stroke-width:5;stroke-linecap:butt}.secondary-beam{stroke-width:3.5}.system-bracket{fill:none;stroke:#111;stroke-width:2;stroke-linejoin:miter}
     .tab-bg{fill:#fff;stroke:none}.tab-number{font:700 14px Arial;text-anchor:middle;dominant-baseline:middle;user-select:none}.tab-voice-1 .tab-number{fill:#2368c4}.tab-voice-2 .tab-number{fill:#b33a3a}.tab-voice-3 .tab-number{fill:#15805f}.selected .tab-bg{fill:#fff2b8}.hit{fill:transparent;cursor:pointer}.measure-hit{fill:transparent;cursor:pointer}.selected-measure{fill:#e8f1ff;opacity:.55}.range-selection{fill:#4f8ee8;opacity:.17;pointer-events:none}
-    .break-mark{fill:#315ca8;font-size:11px}.slur,.tie{fill:none;stroke:#222;stroke-width:1.5}.barre{fill:none;stroke:#222;stroke-width:1.2;stroke-dasharray:5 4}.annotation-text{font:italic 13px serif}.rest{font:20px serif;text-anchor:middle}.status{max-width:1200px;margin:10px auto;color:#536078;font-size:13px}
+    .break-mark{fill:#315ca8;font-size:11px}.slur,.tie{fill:none;stroke:#222;stroke-width:1.5}.barre{fill:none;stroke:#222;stroke-width:1.2;stroke-dasharray:5 4}.annotation-text{font:italic 13px serif}.measure-warning-bg{fill:#fff1f0;stroke:#d84a4a;stroke-width:.8}.measure-warning-text{fill:#b42318;font:600 10px sans-serif;text-anchor:middle}.rest{font:20px serif;text-anchor:middle}.status{max-width:1200px;margin:10px auto;color:#536078;font-size:13px}
     dialog{border:0;border-radius:10px;box-shadow:0 10px 40px #0005;max-width:430px}dialog::backdrop{background:#0006}dialog button{padding:7px 12px}
     @media(max-width:850px){.sheet{width:100%;min-height:0;padding:25px 12px}.top input{width:105px}.brand{width:100%}}
     @media print{header,.status,dialog{display:none!important}body,main{background:#fff;padding:0}.sheet{box-shadow:none;margin:0;width:100%!important;min-height:0!important;padding:12mm}}
@@ -51,7 +51,7 @@
     </article>
     <div class="status" id="status">빈 마디를 클릭한 뒤 키보드 A–G로 음표를 입력하세요. TAB 숫자를 클릭하면 바로 편집할 수 있습니다.</div>
   </main>
-  <dialog id="helpDialog"><h3>키보드 입력</h3><p>A–G(한글 입력 상태에서도 물리 키 기준): 기본 한 옥타브 낮은 음 입력 · . : 점음표 켜기/끄기 · 숫자: 선택한 TAB 프렛 변경 · ←/→: 음표 이동 · 오선 선택 후 ↑/↓: 반음 이동 · TAB 선택 후 ↑/↓: 같은 음을 인접 줄로 이동 · Ctrl+↑/↓: 한 옥타브 이동 · Enter: 선택 마디 다음에서 줄바꿈 · V: 성부 전환 · Delete: 삭제 · 음표를 드래그: 범위 선택 후 바레</p><button autofocus>닫기</button></dialog>
+  <dialog id="helpDialog"><h3>키보드 입력</h3><p>A–G(한글 입력 상태에서도 물리 키 기준): 기본 한 옥타브 낮은 음 입력 · 1–5: 온음표, 2분음표, 4분음표, 8분음표, 16분음표 선택 · TAB 숫자 선택 중 숫자: 프렛 변경 · . : 점음표 켜기/끄기 · ←/→: 음표 이동 · 오선 선택 후 ↑/↓: 반음 이동 · TAB 선택 후 ↑/↓: 같은 음을 인접 줄로 이동 · Ctrl+↑/↓: 한 옥타브 이동 · Tab: 선택 마디 뒤에 새 마디 삽입 · Enter: 선택 마디 다음에서 줄바꿈 · V: 성부 전환 · Delete: 삭제 · 음표를 드래그: 범위 선택 후 바레</p><button autofocus>닫기</button></dialog>
   <script src="./vendor-vexflow.js"></script>
   <script type="module" src="./editor.js"></script>
 </body>

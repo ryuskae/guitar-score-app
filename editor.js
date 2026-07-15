@@ -457,9 +457,12 @@ function render() {
   const systemHeight = Math.max(225, Math.min(320, Number(score.systemSpacing) || 245))*densityScale, top = 5*densityScale;
   const logicalHeight=Math.max(220*densityScale,top+sys.length*systemHeight);
   scoreSvg.setAttribute('viewBox', `0 0 ${width} ${logicalHeight}`);
-  scoreSvg.style.height = `${Math.round(logicalHeight/densityScale)}px`;
   if(!VF){status.textContent='악보 렌더링 라이브러리를 불러오지 못했습니다.';return;}
   const context=new VF.SVGContext(scoreSvg).resize(width,logicalHeight);
+  scoreSvg.removeAttribute('height');
+  scoreSvg.style.height='auto';
+  scoreSvg.style.aspectRatio=`${width} / ${logicalHeight}`;
+  scoreSvg.setAttribute('preserveAspectRatio','xMinYMin meet');
   const layouts = new Map();
   const selected=selectedIds();
   const voiceColors=['#111','#2368c4','#b33a3a','#15805f'];
@@ -508,7 +511,7 @@ function render() {
           const chordPositions=note.positions?.length?note.positions.map(({string,fret})=>({str:string,fret})):[{str:note.string,fret:note.fret}];
           const noteColor=active&&selected.has(note.id)?'#d97706':voiceColor;
           if(note.grace){
-            const graceStaff=new VF.GraceNote({keys:chordKeys,duration:'16',slash:true,stem_direction:direction});
+            const graceStaff=new VF.GraceNote({keys:chordKeys,duration:'16',slash:!!note.graceSlash,stem_direction:direction});
             const graceTab=new VF.GraceTabNote({positions:chordPositions,duration:'16',stem_direction:direction});
             chordKeys.forEach((key,keyIndex)=>{
               const importedAccidental=note.accidentals?.[keyIndex]??(keyIndex===0?note.accidental:null);
@@ -537,12 +540,12 @@ function render() {
           if(!note.rest)for(let dotIndex=0;dotIndex<dotCount;dotIndex++)VF.Dot.buildAndAttach([tabNote],{all:true});
           if(!note.rest)tabNote.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
           if(pendingStaffGrace.length){
-            const group=new VF.GraceNoteGroup(pendingStaffGrace,true);
+            const group=new VF.GraceNoteGroup(pendingStaffGrace,false);
             if(pendingStaffGrace.length>1)group.beamNotes();
             staveNote.addModifier(group);pendingStaffGrace=[];
           }
           if(pendingTabGrace.length&&!note.rest){
-            const group=new VF.GraceNoteGroup(pendingTabGrace,true);
+            const group=new VF.GraceNoteGroup(pendingTabGrace,false);
             if(pendingTabGrace.length>1)group.beamNotes();
             tabNote.addModifier(group);pendingTabGrace=[];
           }
@@ -1023,6 +1026,7 @@ function importMusicXml(text) {
       note.midi = fretNode && fresh.instrument !== 'piano' ? TUNING[string-1] + fret : midi + octaveChange * 12;
       note.rest = !!nx.querySelector('rest');
       note.dots=dots;note.ticks=actualTicks;
+      note.graceSlash=isGrace&&nx.querySelector(':scope > grace')?.getAttribute('slash')==='yes';
       note.accidental=nx.querySelector(':scope > accidental')?.textContent?.trim()||null;
       note.accidentals=[note.accidental];
       note.startTick=isChord?(lastStartByVoice.get(voice)??cursor):cursor;

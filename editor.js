@@ -865,11 +865,12 @@ function importMusicXml(text) {
   fresh.metadata.composer = doc.querySelector('creator[type="composer"]')?.textContent || '';
   fresh.metadata.lyricist = doc.querySelector('creator[type="lyricist"]')?.textContent || '';
   fresh.timeSignature = { beats:Number(doc.querySelector('time beats')?.textContent || 4), beatType:Number(doc.querySelector('time beat-type')?.textContent || 4) };
-  const importedInstrument = doc.querySelector('part-name')?.textContent?.toLowerCase() || '';
+  const importedInstrument = (doc.querySelector('part-name')?.textContent || doc.querySelector('instrument-name')?.textContent || '').toLowerCase();
   fresh.instrument = importedInstrument.includes('piano') ? 'piano' : importedInstrument.includes('electric') ? 'electric-guitar' : importedInstrument.includes('acoustic') ? 'acoustic-guitar' : 'classical-guitar';
   const octaveChange = Number(doc.querySelector('transpose octave-change')?.textContent || 0);
   doc.querySelectorAll('part:first-of-type > measure').forEach((mx) => {
     const m = createMeasure();
+    const divisions = Math.max(1, Number(mx.querySelector('attributes divisions')?.textContent || doc.querySelector('divisions')?.textContent || 1));
     mx.querySelectorAll(':scope > note').forEach((nx) => {
       const voice = Math.max(0, Math.min(3, Number(nx.querySelector('voice')?.textContent || 1)-1));
       const string = Number(nx.querySelector('technical string')?.textContent || 1);
@@ -881,7 +882,11 @@ function importMusicXml(text) {
         midi = (Number(pitch.querySelector('octave')?.textContent)+1)*12 + steps[pitch.querySelector('step')?.textContent] + Number(pitch.querySelector('alter')?.textContent||0);
       } else midi = TUNING[string-1];
       const fret = fretNode ? Number(fretNode.textContent) : Math.max(0, midi-TUNING[string-1]);
-      const note = noteFromStringFret(string, fret, Math.max(1, Number(nx.querySelector('duration')?.textContent||8)), !!nx.querySelector('dot'), !!nx.querySelector('grace'));
+      const xmlDuration = Number(nx.querySelector('duration')?.textContent || divisions);
+      const isDotted = !!nx.querySelector('dot');
+      const typeDuration = {whole:32,half:16,quarter:8,eighth:4,'16th':2,'32nd':1}[nx.querySelector('type')?.textContent];
+      const importedDuration = Math.max(1, typeDuration || Math.round((xmlDuration / divisions) * 8 / (isDotted ? 1.5 : 1)));
+      const note = noteFromStringFret(string, fret, importedDuration, isDotted, !!nx.querySelector('grace'));
       note.midi = fretNode && fresh.instrument !== 'piano' ? TUNING[string-1] + fret : midi + octaveChange * 12;
       note.rest = !!nx.querySelector('rest'); m.voices[voice].push(note);
     });

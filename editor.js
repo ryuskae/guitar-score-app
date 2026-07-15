@@ -465,7 +465,7 @@ function render() {
   const voiceColors=['#111','#2368c4','#b33a3a','#15805f'];
   sys.forEach((items, systemIndex) => {
     const y=top+systemIndex*systemHeight;
-    const left=24, usable=width-48;
+    const left=32*densityScale, usable=width-left-72*densityScale;
     const measureWidth = usable / items.length;
     const piano = score.instrument === 'piano';
     let firstStaff=null,firstLower=null;
@@ -495,6 +495,7 @@ function render() {
         const voiceColor=active?voiceColors[voiceIndex]:'#aeb4bf';
         const direction=voiceIndex%2===0?VF.Stem.UP:VF.Stem.DOWN;
         const staffNotes=[],tabNotes=[];
+        let pendingStaffGrace=[],pendingTabGrace=[];
         let renderTick=0;
         modelVoice.forEach((note)=>{
           const startTick=Number.isFinite(note.startTick)?note.startTick:renderTick;
@@ -504,9 +505,23 @@ function render() {
           }
           const chordMidis=note.pitches?.length?note.pitches:[note.midi];
           const chordKeys=chordMidis.map(vexKey);
+          const chordPositions=note.positions?.length?note.positions.map(({string,fret})=>({str:string,fret})):[{str:note.string,fret:note.fret}];
+          const noteColor=active&&selected.has(note.id)?'#d97706':voiceColor;
+          if(note.grace){
+            const graceStaff=new VF.GraceNote({keys:chordKeys,duration:'16',slash:true,stem_direction:direction});
+            const graceTab=new VF.GraceTabNote({positions:chordPositions,duration:'16',stem_direction:direction});
+            chordKeys.forEach((key,keyIndex)=>{
+              const importedAccidental=note.accidentals?.[keyIndex]??(keyIndex===0?note.accidental:null);
+              const symbol={sharp:'#',flat:'b',natural:'n','double-sharp':'##','flat-flat':'bb'}[importedAccidental];
+              if(symbol)graceStaff.addModifier(new VF.Accidental(symbol),keyIndex);
+            });
+            graceStaff.setStyle({fillStyle:noteColor,strokeStyle:noteColor});graceTab.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
+            pendingStaffGrace.push(graceStaff);pendingTabGrace.push(graceTab);
+            staffById.set(note.id,graceStaff);tabById.set(note.id,graceTab);
+            return;
+          }
           let staveNote;
-          if(note.grace) staveNote=new VF.GraceNote({keys:chordKeys,duration:'16',slash:true,stem_direction:direction});
-          else staveNote=new VF.StaveNote({keys:chordKeys,duration:vexDuration(note,note.rest),stem_direction:direction});
+          staveNote=new VF.StaveNote({keys:chordKeys,duration:vexDuration(note,note.rest),stem_direction:direction});
           if(!note.rest)chordKeys.forEach((key,keyIndex)=>{
             const importedAccidental=note.accidentals?.[keyIndex]??(keyIndex===0?note.accidental:null);
             const accidentalMap={sharp:'#',flat:'b',natural:'n','double-sharp':'##','flat-flat':'bb'};
@@ -516,13 +531,21 @@ function render() {
           const dotCount=Number.isFinite(note.dots)?note.dots:(note.dotted?1:0);
           for(let dotIndex=0;dotIndex<dotCount;dotIndex++)VF.Dot.buildAndAttach([staveNote],{all:true});
           if(note.fermata)staveNote.addModifier(new VF.Articulation('a@a').setPosition(VF.Modifier.Position.ABOVE));
-          const noteColor=active&&selected.has(note.id)?'#d97706':voiceColor;
           staveNote.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
           staffNotes.push(staveNote);staffById.set(note.id,staveNote);
-          const chordPositions=note.positions?.length?note.positions.map(({string,fret})=>({str:string,fret})):[{str:note.string,fret:note.fret}];
           const tabNote=note.rest?new VF.GhostNote({duration:vexDuration(note)}):new VF.TabNote({positions:chordPositions,duration:vexDuration(note),stem_direction:direction},true);
           if(!note.rest)for(let dotIndex=0;dotIndex<dotCount;dotIndex++)VF.Dot.buildAndAttach([tabNote],{all:true});
           if(!note.rest)tabNote.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
+          if(pendingStaffGrace.length){
+            const group=new VF.GraceNoteGroup(pendingStaffGrace,true);
+            if(pendingStaffGrace.length>1)group.beamNotes();
+            staveNote.addModifier(group);pendingStaffGrace=[];
+          }
+          if(pendingTabGrace.length&&!note.rest){
+            const group=new VF.GraceNoteGroup(pendingTabGrace,true);
+            if(pendingTabGrace.length>1)group.beamNotes();
+            tabNote.addModifier(group);pendingTabGrace=[];
+          }
           tabNotes.push(tabNote);tabById.set(note.id,tabNote);
           renderTick=Math.max(renderTick,startTick+durationTicks(note));
         });
@@ -534,8 +557,8 @@ function render() {
         staffVoices.push(sv);tabVoices.push(tv);
         const beam=beamData(measure,voiceIndex);
         beam.groups.forEach((items)=>{
-          const s=items.map(({note})=>staffById.get(note.id)).filter(Boolean);
-          const t=items.map(({note})=>tabById.get(note.id)).filter((item)=>item&&!(item instanceof VF.GhostNote));
+          const s=items.filter(({note})=>!note.grace).map(({note})=>staffById.get(note.id)).filter(Boolean);
+          const t=items.filter(({note})=>!note.grace).map(({note})=>tabById.get(note.id)).filter((item)=>item&&!(item instanceof VF.GhostNote));
           if(s.length>1){
             const staffBeam=new VF.Beam(s,false).setStyle({fillStyle:voiceColor,strokeStyle:voiceColor});
             staffBeams.push(staffBeam);

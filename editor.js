@@ -463,6 +463,8 @@ function render() {
           if(!note.rest)tabNote.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
           tabNotes.push(tabNote);tabById.set(note.id,tabNote);
         });
+        staffNotes.forEach((note)=>note.setStave(staff));
+        tabNotes.forEach((note)=>note.setStave(lower));
         const time={num_beats:score.timeSignature.beats,beat_value:score.timeSignature.beatType};
         const sv=new VF.Voice(time).setMode(VF.Voice.Mode.SOFT).addTickables(staffNotes).setStave(staff);
         const tv=new VF.Voice(time).setMode(VF.Voice.Mode.SOFT).addTickables(tabNotes).setStave(lower);
@@ -471,8 +473,14 @@ function render() {
         beam.groups.forEach((items)=>{
           const s=items.map(({note})=>staffById.get(note.id)).filter(Boolean);
           const t=items.map(({note})=>tabById.get(note.id)).filter((item)=>item&&!(item instanceof VF.GhostNote));
-          if(s.length>1)staffBeams.push(new VF.Beam(s,false).setStyle({fillStyle:voiceColor,strokeStyle:voiceColor}));
-          if(t.length>1)tabBeams.push(new VF.Beam(t,false).setStyle({fillStyle:voiceColor,strokeStyle:voiceColor}));
+          if(s.length>1){
+            const staffBeam=new VF.Beam(s,false).setStyle({fillStyle:voiceColor,strokeStyle:voiceColor});
+            staffBeams.push(staffBeam);
+          }
+          if(t.length>1){
+            const tabBeam=new VF.Beam(t,false).setStyle({fillStyle:voiceColor,strokeStyle:voiceColor});
+            tabBeams.push(tabBeam);
+          }
         });
       });
       const allVoices=[...staffVoices,...tabVoices];
@@ -863,7 +871,7 @@ async function exportPdf() {
 function importMusicXml(text) {
   const doc = new DOMParser().parseFromString(text, 'application/xml');
   if (doc.querySelector('parsererror')) throw new Error('올바른 MusicXML 파일이 아닙니다.');
-  const fresh = createScore(); fresh.measures = [];
+  const fresh = createScore(); fresh.measures = []; fresh.measuresPerSystem = 5;
   fresh.metadata.title = doc.querySelector('work-title')?.textContent || '';
   fresh.metadata.composer = doc.querySelector('creator[type="composer"]')?.textContent || '';
   fresh.metadata.lyricist = doc.querySelector('creator[type="lyricist"]')?.textContent || '';

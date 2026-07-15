@@ -93,6 +93,7 @@ document.addEventListener('pointerup', () => {
 });
 
 function notePosition(note, measure, voice) {
+  if(Number.isFinite(note.startTick))return note.startTick;
   let tick = 0;
   for (const n of measure.voices[voice]) {
     if (n.id === note.id) return tick;
@@ -211,6 +212,22 @@ function drawNote(note, measure, measureIndex, voice, x, staffY, tabY, group, be
 function beamData(measure, voice) {
   const levels = new Map();
   const groups = [];
+  const imported=measure.voices[voice];
+  if(imported.some((note)=>note.beams?.length)){
+    let current=[];
+    const flush=()=>{if(current.length>1)groups.push(current);current=[];};
+    imported.forEach((note)=>{
+      const primary=note.beams?.find((beam)=>beam.number===1)?.value;
+      if(primary==='begin'){flush();current=[{note,tick:note.startTick??0}];}
+      else if(primary==='continue')current.push({note,tick:note.startTick??0});
+      else if(primary==='end'){current.push({note,tick:note.startTick??0});flush();}
+      else if(primary!=='forward hook'&&primary!=='backward hook')flush();
+      const beamCount=note.beams?.filter((beam)=>beam.value!=='forward hook'&&beam.value!=='backward hook').length||0;
+      if(beamCount)levels.set(note.id,beamCount);
+    });
+    flush();
+    return {levels,groups};
+  }
   const beatLength = 8 * (4 / score.timeSignature.beatType);
   const compound = score.timeSignature.beatType === 8 && score.timeSignature.beats >= 6 && score.timeSignature.beats % 3 === 0;
   // In 4/4, consecutive eighths conventionally read as 1–2 | 3–4:
@@ -299,10 +316,27 @@ function endpointFor(ref) {
 
 const VEX_DURATION = { 32:'w', 16:'h', 8:'q', 4:'8', 2:'16', 1:'32' };
 const VEX_NAMES = ['c','c#','d','d#','e','f','f#','g','g#','a','a#','b'];
+const KEY_BY_FIFTHS = ['Cb','Gb','Db','Ab','Eb','Bb','F','C','G','D','A','E','B','F#','C#'];
 
 function vexDuration(note, rest=false) {
   const base = VEX_DURATION[note.duration] || 'q';
-  return `${base}${note.dotted?'d':''}${rest?'r':''}`;
+  const dots=Number.isFinite(note.dots)?note.dots:(note.dotted?1:0);
+  return `${base}${'d'.repeat(dots)}${rest?'r':''}`;
+}
+
+function spacerNotes(ticks) {
+  const values=[32,24,16,12,8,6,4,3,2,1];
+  const notes=[];
+  let remaining=Math.max(0,Math.round(ticks));
+  values.forEach((value)=>{
+    while(remaining>=value){
+      const dotted=value===24||value===12||value===6||value===3;
+      const duration=dotted?value/1.5:value;
+      notes.push(new VF.GhostNote({duration:`${VEX_DURATION[duration]}${dotted?'d':''}`}));
+      remaining-=value;
+    }
+  });
+  return notes;
 }
 
 function vexKey(midi) {
@@ -314,7 +348,7 @@ function selectionOrder() {
   const entries=[];
   score.measures.forEach((measure, measureIndex) => measure.voices.forEach((voice, voiceIndex) => {
     let tick=0;
-    voice.forEach((note) => { entries.push({note,measure:measureIndex,voice:voiceIndex,tick});tick+=durationTicks(note); });
+    voice.forEach((note) => { const noteTick=Number.isFinite(note.startTick)?note.startTick:tick;entries.push({note,measure:measureIndex,voice:voiceIndex,tick:noteTick});tick=Math.max(tick,noteTick+durationTicks(note)); });
   }));
   return entries.sort((a,b)=>a.measure-b.measure||a.tick-b.tick||a.voice-b.voice);
 }
@@ -339,6 +373,13 @@ function drawAnnotations(layouts) {
     current.left = Math.min(current.left, layout.x); current.right = Math.max(current.right, layout.x+layout.width);
     bounds.set(layout.system, current);
   }
+  score.measures.forEach((measure,measureIndex)=>{
+    const layout=layouts.get(measureIndex);
+    measure.directions?.forEach((direction,index)=>{
+      if(!layout)return;
+      svg('text',{x:layout.noteStart,y:direction.placement==='below'?layout.tabY+82:layout.staffY-18-index*14,text:direction.text,class:'music-direction','font-size':11,'font-family':'serif','font-style':'italic'});
+    });
+  });
   for (const ann of score.annotations) {
     let a = endpointFor(ann.start), b = endpointFor(ann.end);
     if (!a || !b) continue;
@@ -409,13 +450,16 @@ function render() {
   $('#printComposer').textContent = score.metadata.composer || '';
   sheet.style.setProperty('--score-text-font',score.textFont||'Georgia, serif');
   sheet.dataset.page = score.page;
-  const width = score.page === 'Screen' ? 1100 : score.page === 'A3' ? 1000 : 720;
+  const baseWidth = score.page === 'Screen' ? 1100 : score.page === 'A3' ? 1000 : 720;
+  const densityScale=Math.max(1,(Number(score.measuresPerSystem)||3)/3);
+  const width = baseWidth*densityScale;
   const sys = systems();
-  const systemHeight = Math.max(225, Math.min(320, Number(score.systemSpacing) || 245)), top = 5;
-  scoreSvg.setAttribute('viewBox', `0 0 ${width} ${Math.max(220, top + sys.length * systemHeight)}`);
-  scoreSvg.style.height = `${Math.max(220, top + sys.length * systemHeight)}px`;
+  const systemHeight = Math.max(225, Math.min(320, Number(score.systemSpacing) || 245))*densityScale, top = 5*densityScale;
+  const logicalHeight=Math.max(220*densityScale,top+sys.length*systemHeight);
+  scoreSvg.setAttribute('viewBox', `0 0 ${width} ${logicalHeight}`);
+  scoreSvg.style.height = `${Math.round(logicalHeight/densityScale)}px`;
   if(!VF){status.textContent='악보 렌더링 라이브러리를 불러오지 못했습니다.';return;}
-  const context=new VF.SVGContext(scoreSvg).resize(width,Math.max(220,top+sys.length*systemHeight));
+  const context=new VF.SVGContext(scoreSvg).resize(width,logicalHeight);
   const layouts = new Map();
   const selected=selectedIds();
   const voiceColors=['#111','#2368c4','#b33a3a','#15805f'];
@@ -428,40 +472,59 @@ function render() {
     items.forEach(({ measure, index }, localIndex) => {
       const x = left + localIndex * measureWidth;
       const staff=new VF.Stave(x,y,measureWidth);
-      const lower=piano?new VF.Stave(x,y+122,measureWidth):new VF.TabStave(x,y+122,measureWidth);
+      const lower=piano?new VF.Stave(x,y+122*densityScale,measureWidth):new VF.TabStave(x,y+122*densityScale,measureWidth);
       if(localIndex===0){
-        staff.addClef('treble','default',piano?undefined:'8vb').addTimeSignature(`${score.timeSignature.beats}/${score.timeSignature.beatType}`);
+        staff.addClef('treble','default',piano?undefined:'8vb');
+        if(Number.isFinite(score.keyFifths))staff.addKeySignature(KEY_BY_FIFTHS[Math.max(0,Math.min(14,score.keyFifths+7))]);
+        staff.addTimeSignature(score.timeSymbol==='common'?'C':`${score.timeSignature.beats}/${score.timeSignature.beatType}`);
+        if(systemIndex===0&&score.tempo)staff.setTempo({duration:'q',bpm:score.tempo},-18);
         lower.addClef(piano?'bass':'tab');
         firstStaff=staff;firstLower=lower;
       }
+      if(measure.repeatStart){staff.setBegBarType(VF.Barline.type.REPEAT_BEGIN);lower.setBegBarType(VF.Barline.type.REPEAT_BEGIN);}
+      if(measure.repeatEnd){staff.setEndBarType(VF.Barline.type.REPEAT_END);lower.setEndBarType(VF.Barline.type.REPEAT_END);}
       VF.Stave.formatBegModifiers([staff,lower]);
       staff.setContext(context).draw();lower.setContext(context).draw();
       const staffTop=staff.getYForLine(0),staffBottom=staff.getYForLine(4);
       const lowerTop=lower.getYForLine(0),lowerBottom=lower.getYForLine(piano?4:5);
       layouts.set(index,{x,width:measureWidth,staffY:staffTop,tabY:lowerTop,lowerBottom,noteStart:staff.getNoteStartX(),noteEnd:staff.getNoteEndX(),system:systemIndex});
-      const staffVoices=[],tabVoices=[],staffById=new Map(),tabById=new Map(),staffBeams=[],tabBeams=[];
+      const staffVoices=[],tabVoices=[],staffById=new Map(),tabById=new Map(),staffBeams=[],tabBeams=[],staffTuplets=[],tabTuplets=[];
       measure.voices.forEach((modelVoice,voiceIndex)=>{
         if(!modelVoice.length)return;
         const active=voiceIndex===score.activeVoice;
         const voiceColor=active?voiceColors[voiceIndex]:'#aeb4bf';
         const direction=voiceIndex%2===0?VF.Stem.UP:VF.Stem.DOWN;
         const staffNotes=[],tabNotes=[];
+        let renderTick=0;
         modelVoice.forEach((note)=>{
+          const startTick=Number.isFinite(note.startTick)?note.startTick:renderTick;
+          if(startTick>renderTick+.01){
+            const staffSpacers=spacerNotes(startTick-renderTick),tabSpacers=spacerNotes(startTick-renderTick);
+            staffNotes.push(...staffSpacers);tabNotes.push(...tabSpacers);renderTick=startTick;
+          }
           const chordMidis=note.pitches?.length?note.pitches:[note.midi];
           const chordKeys=chordMidis.map(vexKey);
           let staveNote;
           if(note.grace) staveNote=new VF.GraceNote({keys:chordKeys,duration:'16',slash:true,stem_direction:direction});
           else staveNote=new VF.StaveNote({keys:chordKeys,duration:vexDuration(note,note.rest),stem_direction:direction});
-          if(!note.rest)chordKeys.forEach((key,keyIndex)=>{if(key.includes('#'))staveNote.addModifier(new VF.Accidental('#'),keyIndex);});
-          if(note.dotted)VF.Dot.buildAndAttach([staveNote],{all:true});
+          if(!note.rest)chordKeys.forEach((key,keyIndex)=>{
+            const importedAccidental=note.accidentals?.[keyIndex]??(keyIndex===0?note.accidental:null);
+            const accidentalMap={sharp:'#',flat:'b',natural:'n','double-sharp':'##','flat-flat':'bb'};
+            const symbol=accidentalMap[importedAccidental]||(!score.importedXml&&key.includes('#')?'#':null);
+            if(symbol)staveNote.addModifier(new VF.Accidental(symbol),keyIndex);
+          });
+          const dotCount=Number.isFinite(note.dots)?note.dots:(note.dotted?1:0);
+          for(let dotIndex=0;dotIndex<dotCount;dotIndex++)VF.Dot.buildAndAttach([staveNote],{all:true});
+          if(note.fermata)staveNote.addModifier(new VF.Articulation('a@a').setPosition(VF.Modifier.Position.ABOVE));
           const noteColor=active&&selected.has(note.id)?'#d97706':voiceColor;
           staveNote.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
           staffNotes.push(staveNote);staffById.set(note.id,staveNote);
           const chordPositions=note.positions?.length?note.positions.map(({string,fret})=>({str:string,fret})):[{str:note.string,fret:note.fret}];
           const tabNote=note.rest?new VF.GhostNote({duration:vexDuration(note)}):new VF.TabNote({positions:chordPositions,duration:vexDuration(note),stem_direction:direction},true);
-          if(note.dotted&&!note.rest)VF.Dot.buildAndAttach([tabNote],{all:true});
+          if(!note.rest)for(let dotIndex=0;dotIndex<dotCount;dotIndex++)VF.Dot.buildAndAttach([tabNote],{all:true});
           if(!note.rest)tabNote.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
           tabNotes.push(tabNote);tabById.set(note.id,tabNote);
+          renderTick=Math.max(renderTick,startTick+durationTicks(note));
         });
         staffNotes.forEach((note)=>note.setStave(staff));
         tabNotes.forEach((note)=>note.setStave(lower));
@@ -482,6 +545,18 @@ function render() {
             tabBeams.push(tabBeam);
           }
         });
+        for(let tupletIndex=0;tupletIndex<modelVoice.length;){
+          const first=modelVoice[tupletIndex],actual=first.tuplet?.actual,normal=first.tuplet?.normal;
+          if(!actual||!normal){tupletIndex++;continue;}
+          const group=modelVoice.slice(tupletIndex,tupletIndex+actual).filter((note)=>note.tuplet?.actual===actual&&note.tuplet?.normal===normal);
+          if(group.length===actual){
+            const staffGroup=group.map((note)=>staffById.get(note.id)).filter(Boolean);
+            const tabGroup=group.map((note)=>tabById.get(note.id)).filter((note)=>note&&!(note instanceof VF.GhostNote));
+            if(staffGroup.length===actual)staffTuplets.push(new VF.Tuplet(staffGroup,{num_notes:actual,notes_occupied:normal}));
+            if(tabGroup.length===actual)tabTuplets.push(new VF.Tuplet(tabGroup,{num_notes:actual,notes_occupied:normal}));
+            tupletIndex+=actual;
+          }else tupletIndex++;
+        }
       });
       const allVoices=[...staffVoices,...tabVoices];
       if(allVoices.length){
@@ -493,6 +568,7 @@ function render() {
         formatter.format(allVoices,Math.max(30,staff.getNoteEndX()-start-8));
         staffVoices.forEach((v)=>v.draw(context,staff));tabVoices.forEach((v)=>v.draw(context,lower));
         staffBeams.forEach((beam)=>beam.setContext(context).draw());tabBeams.forEach((beam)=>beam.setContext(context).draw());
+        staffTuplets.forEach((tuplet)=>tuplet.setContext(context).draw());tabTuplets.forEach((tuplet)=>tuplet.setContext(context).draw());
         measure.voices.forEach((voice,voiceIndex)=>voice.forEach((note)=>{
           const sn=staffById.get(note.id),tn=tabById.get(note.id);
           if(!sn)return;
@@ -871,19 +947,40 @@ async function exportPdf() {
 function importMusicXml(text) {
   const doc = new DOMParser().parseFromString(text, 'application/xml');
   if (doc.querySelector('parsererror')) throw new Error('올바른 MusicXML 파일이 아닙니다.');
-  const fresh = createScore(); fresh.measures = []; fresh.measuresPerSystem = 5;
+  const fresh = createScore(); fresh.measures = []; fresh.measuresPerSystem = 5; fresh.importedXml=true;
   fresh.metadata.title = doc.querySelector('work-title')?.textContent || '';
   fresh.metadata.composer = doc.querySelector('creator[type="composer"]')?.textContent || '';
   fresh.metadata.lyricist = doc.querySelector('creator[type="lyricist"]')?.textContent || '';
   fresh.timeSignature = { beats:Number(doc.querySelector('time beats')?.textContent || 4), beatType:Number(doc.querySelector('time beat-type')?.textContent || 4) };
+  fresh.timeSymbol=doc.querySelector('time')?.getAttribute('symbol')||'';
+  fresh.keyFifths=Number(doc.querySelector('key fifths')?.textContent||0);
+  fresh.tempo=Number(doc.querySelector('metronome per-minute')?.textContent||doc.querySelector('sound[tempo]')?.getAttribute('tempo')||0);
   const importedInstrument = (doc.querySelector('part-name')?.textContent || doc.querySelector('instrument-name')?.textContent || '').toLowerCase();
   fresh.instrument = importedInstrument.includes('piano') ? 'piano' : importedInstrument.includes('electric') ? 'electric-guitar' : importedInstrument.includes('acoustic') ? 'acoustic-guitar' : 'classical-guitar';
   const octaveChange = Number(doc.querySelector('transpose octave-change')?.textContent || 0);
-  doc.querySelectorAll('part:first-of-type > measure').forEach((mx) => {
+  let currentDivisions=Math.max(1,Number(doc.querySelector('divisions')?.textContent||1));
+  const openSlurs=new Map();
+  doc.querySelectorAll('part:first-of-type > measure').forEach((mx,measureIndex) => {
     const m = createMeasure();
-    const divisions = Math.max(1, Number(mx.querySelector('attributes divisions')?.textContent || doc.querySelector('divisions')?.textContent || 1));
-    mx.querySelectorAll(':scope > note').forEach((nx) => {
+    m.directions=[...mx.querySelectorAll(':scope > direction words')].map((words)=>({text:words.textContent.trim(),placement:words.closest('direction')?.getAttribute('placement')||'above'})).filter((item)=>item.text);
+    const changedDivisions=Number(mx.querySelector(':scope > attributes > divisions')?.textContent||0);
+    if(changedDivisions)currentDivisions=changedDivisions;
+    let cursor=0;
+    const lastStartByVoice=new Map();
+    [...mx.children].forEach((child) => {
+      if(child.tagName==='backup'){
+        cursor-=Number(child.querySelector('duration')?.textContent||0)/currentDivisions*8;
+        return;
+      }
+      if(child.tagName==='forward'){
+        cursor+=Number(child.querySelector('duration')?.textContent||0)/currentDivisions*8;
+        return;
+      }
+      if(child.tagName!=='note')return;
+      const nx=child;
       const voice = Math.max(0, Math.min(3, Number(nx.querySelector('voice')?.textContent || 1)-1));
+      const isChord=!!nx.querySelector(':scope > chord');
+      const isGrace=!!nx.querySelector(':scope > grace');
       const string = Number(nx.querySelector('technical string')?.textContent || 1);
       const fretNode = nx.querySelector('technical fret');
       let midi;
@@ -893,24 +990,51 @@ function importMusicXml(text) {
         midi = (Number(pitch.querySelector('octave')?.textContent)+1)*12 + steps[pitch.querySelector('step')?.textContent] + Number(pitch.querySelector('alter')?.textContent||0);
       } else midi = TUNING[string-1];
       const fret = fretNode ? Number(fretNode.textContent) : Math.max(0, midi-TUNING[string-1]);
-      const xmlDuration = Number(nx.querySelector('duration')?.textContent || divisions);
-      const isDotted = !!nx.querySelector('dot');
+      const xmlDuration = Number(nx.querySelector(':scope > duration')?.textContent || 0);
+      const actualTicks=isGrace?0:xmlDuration/currentDivisions*8;
+      const dots=nx.querySelectorAll(':scope > dot').length;
+      const isDotted = dots>0;
       const typeDuration = {whole:32,half:16,quarter:8,eighth:4,'16th':2,'32nd':1}[nx.querySelector('type')?.textContent];
-      const importedDuration = Math.max(1, typeDuration || Math.round((xmlDuration / divisions) * 8 / (isDotted ? 1.5 : 1)));
-      const note = noteFromStringFret(string, fret, importedDuration, isDotted, !!nx.querySelector('grace'));
+      const importedDuration = Math.max(1, typeDuration || 8);
+      const note = noteFromStringFret(string, fret, importedDuration, isDotted, isGrace);
       note.midi = fretNode && fresh.instrument !== 'piano' ? TUNING[string-1] + fret : midi + octaveChange * 12;
       note.rest = !!nx.querySelector('rest');
-      if(nx.querySelector('chord')){
+      note.dots=dots;note.ticks=actualTicks;
+      note.accidental=nx.querySelector(':scope > accidental')?.textContent?.trim()||null;
+      note.accidentals=[note.accidental];
+      note.startTick=isChord?(lastStartByVoice.get(voice)??cursor):cursor;
+      note.beams=[...nx.querySelectorAll(':scope > beam')].map((beam)=>({number:Number(beam.getAttribute('number')||1),value:beam.textContent.trim()}));
+      const timeModification=nx.querySelector(':scope > time-modification');
+      if(timeModification)note.tuplet={actual:Number(timeModification.querySelector('actual-notes')?.textContent||0),normal:Number(timeModification.querySelector('normal-notes')?.textContent||0)};
+      note.fermata=!!nx.querySelector('fermata');
+      if(isChord){
         const previous=m.voices[voice].at(-1);
         if(previous&&!previous.rest){
           previous.pitches ||= [previous.midi];
           previous.positions ||= [{string:previous.string,fret:previous.fret}];
           previous.pitches.push(note.midi);
           previous.positions.push({string:note.string,fret:note.fret});
+          previous.accidentals ||= [previous.accidental||null];
+          previous.accidentals.push(note.accidental);
           return;
         }
       }
       m.voices[voice].push(note);
+      lastStartByVoice.set(voice,note.startTick);
+      if(!isGrace)cursor+=actualTicks;
+      nx.querySelectorAll('slur').forEach((slur)=>{
+        const number=slur.getAttribute('number')||'1',type=slur.getAttribute('type');
+        if(type==='start')openSlurs.set(number,{measure:measureIndex,voice,noteId:note.id});
+        else if(type==='stop'&&openSlurs.has(number)){
+          fresh.annotations.push({type:'slur',start:openSlurs.get(number),end:{measure:measureIndex,voice,noteId:note.id}});
+          openSlurs.delete(number);
+        }
+      });
+    });
+    mx.querySelectorAll(':scope > barline').forEach((barline)=>{
+      const direction=barline.querySelector('repeat')?.getAttribute('direction');
+      if(direction==='forward')m.repeatStart=true;
+      if(direction==='backward')m.repeatEnd=true;
     });
     if (mx.querySelector('print[new-system="yes"]') && fresh.measures.length) fresh.measures.at(-1).forceBreakAfter = true;
     fresh.measures.push(m);

@@ -11,7 +11,7 @@
     .top,.toolbar{display:flex;align-items:center;gap:7px;flex-wrap:wrap;max-width:1200px;margin:auto}
     .brand{font-weight:800;margin-right:auto}.top input{width:150px;padding:6px 8px;border:1px solid #64748b;border-radius:5px;background:#fff;color:#111}
     .toolbar{margin-top:8px}.toolbar button,.toolbar select,.file-label{border:1px solid #526078;background:#26344e;color:#fff;border-radius:5px;padding:6px 9px;cursor:pointer}
-    .toolbar button:hover,.toolbar button.active,.file-label:hover{background:#315ca8}.toolbar .danger:hover{background:#a83030}.barre-control{display:inline-flex;align-items:center;gap:2px;color:#fff;font:600 14px serif}.barre-control input{width:43px;padding:5px 4px;border:1px solid #526078;border-radius:4px;background:#fff;color:#111}
+    .toolbar button:hover,.toolbar button.active,.file-label:hover{background:#315ca8}.toolbar .danger:hover{background:#a83030}.barre-control{display:inline-flex;align-items:center;gap:2px;color:#fff;font:600 14px serif}.barre-control select{width:54px;padding:5px 4px;border:1px solid #526078;border-radius:4px;background:#fff;color:#111}
     .sep{width:1px;height:25px;background:#63708a;margin:0 2px}.file-label input{display:none}
     main{padding:22px 10px 60px}.sheet{--score-text-font:Georgia,serif;position:relative;margin:auto;background:#fff;box-shadow:0 4px 24px #26344e33;min-height:297mm;width:210mm;padding:15mm 12mm;overflow:hidden}
     .sheet[data-page="A3"]{width:297mm;min-height:420mm}.sheet[data-page="Letter"]{width:216mm;min-height:279mm}.sheet[data-page="Screen"]{width:min(1180px,96vw);min-height:700px}
@@ -36,11 +36,13 @@
     <div class="toolbar">
       <button data-duration="32">온음표</button><button data-duration="16">2분</button><button data-duration="8" class="active">4분</button><button data-duration="4">8분</button><button data-duration="2">16분</button>
       <button id="dot" title="점음표">.</button><button id="rest">쉼표</button><button id="voice">V1</button>
-      <span class="sep"></span><button id="tie">타이</button><button id="slur">슬러</button><button id="grace">꾸밈음</button><button id="barre">바레</button><label class="barre-control">C.<input id="barreFret" type="number" min="1" max="30" value="5" aria-label="바레 프렛"></label>
+      <span class="sep"></span><button id="tie">타이</button><button id="slur">슬러</button><button id="grace">꾸밈음</button><button id="barre">바레</button><label class="barre-control">C.<select id="barreFret" aria-label="바레 프렛"><option>1</option><option>2</option><option>3</option><option>4</option><option selected>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option><option>13</option><option>14</option><option>15</option><option>16</option><option>17</option><option>18</option><option>19</option><option>20</option></select></label>
       <span class="sep"></span><button id="undo">실행 취소</button><button id="clear" class="danger">전체 지우기</button>
       <select id="instrument" title="악기"><option value="classical-guitar">클래식 기타</option><option value="acoustic-guitar">통기타</option><option value="electric-guitar">일렉 기타</option><option value="piano">피아노</option></select>
       <select id="timeSignature" title="박자표"><option value="2/4">2/4</option><option value="3/4">3/4</option><option value="4/4" selected>4/4</option><option value="5/4">5/4</option><option value="6/8">6/8</option><option value="9/8">9/8</option><option value="12/8">12/8</option></select>
       <select id="page" title="페이지 크기"><option>A4</option><option>A3</option><option>Letter</option><option>Screen</option></select>
+      <select id="measuresPerSystem" title="한 시스템의 기본 마디 수"><option value="1">한 줄에 1마디</option><option value="2">한 줄에 2마디</option><option value="3" selected>한 줄에 3마디</option><option value="4">한 줄에 4마디</option><option value="5">한 줄에 5마디</option><option value="6">한 줄에 6마디</option></select>
+      <select id="systemSpacing" title="시스템 사이의 세로 간격"><option value="225">시스템 간격: 좁게</option><option value="245" selected>시스템 간격: 보통</option><option value="280">시스템 간격: 넓게</option><option value="320">시스템 간격: 매우 넓게</option></select>
       <select id="textFont" title="제목과 작사·작곡 글꼴"><option value="Georgia, serif">조지아</option><option value="Palatino Linotype, Book Antiqua, serif">팔라티노</option><option value="Times New Roman, serif">타임스</option><option value="Arial, sans-serif">고딕</option><option value="cursive">필기체</option></select>
       <button id="xmlExport">MusicXML 내보내기</button><label class="file-label">MusicXML 불러오기<input id="xmlImport" type="file" accept=".xml,.musicxml,application/xml"></label><button id="pdf">PDF 저장</button><button id="help">사용법</button>
     </div>

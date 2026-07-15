@@ -16,7 +16,7 @@
     main{padding:22px 10px 60px}.sheet{--score-text-font:Georgia,serif;position:relative;margin:auto;background:#fff;box-shadow:0 4px 24px #26344e33;min-height:297mm;width:210mm;padding:15mm 12mm;overflow:hidden}
     .sheet[data-page="A3"]{width:297mm;min-height:420mm}.sheet[data-page="Letter"]{width:216mm;min-height:279mm}.sheet[data-page="Screen"]{width:min(1180px,96vw);min-height:700px}
     .score-title{text-align:center;margin:0;font-family:var(--score-text-font);font-size:28px;min-height:34px}.credits{display:flex;justify-content:space-between;min-height:25px;font-family:var(--score-text-font)}
-    #score{width:100%;display:block;overflow:visible}.staff-line,.ledger-line,.tab-line,.barline{stroke:#222;stroke-width:1}.ledger-line{stroke-width:1.2}.tab-line{stroke-width:.8}.notehead{fill:#111}.voice-1 .notehead{fill:#2368c4}.voice-2 .notehead{fill:#b33a3a}.voice-3 .notehead{fill:#15805f}
+    #score{width:100%;display:block;overflow:visible}#score>svg{display:block;width:100%;height:auto;overflow:visible}.staff-line,.ledger-line,.tab-line,.barline{stroke:#222;stroke-width:1}.ledger-line{stroke-width:1.2}.tab-line{stroke-width:.8}.notehead{fill:#111}.voice-1 .notehead{fill:#2368c4}.voice-2 .notehead{fill:#b33a3a}.voice-3 .notehead{fill:#15805f}
     .inactive-voice{opacity:.46}.selected .notehead,.selected .stem{filter:drop-shadow(0 0 2px #f59e0b);stroke:#f59e0b;stroke-width:2}.stem{stroke:#111;stroke-width:1.3}.beam{stroke:#111;stroke-width:5;stroke-linecap:butt}.secondary-beam{stroke-width:3.5}.system-bracket{fill:none;stroke:#111;stroke-width:2;stroke-linejoin:miter}
     .tab-bg{fill:#fff;stroke:none}.tab-number{font:700 14px Arial;text-anchor:middle;dominant-baseline:middle;user-select:none}.tab-voice-1 .tab-number{fill:#2368c4}.tab-voice-2 .tab-number{fill:#b33a3a}.tab-voice-3 .tab-number{fill:#15805f}.selected .tab-bg{fill:#fff2b8}.hit{fill:transparent;cursor:pointer}.measure-hit{fill:transparent;cursor:pointer}.selected-measure{fill:#e8f1ff;opacity:.55}.range-selection{fill:#4f8ee8;opacity:.17;pointer-events:none}
     .break-mark{fill:#315ca8;font-size:11px}.slur,.tie{fill:none;stroke:#222;stroke-width:1.5}.barre{fill:none;stroke:#222;stroke-width:1.2;stroke-dasharray:5 4}.annotation-text{font:italic 13px serif}.voice-cursor{stroke-width:2.4;stroke-linecap:round;pointer-events:none}.voice-cursor-head{pointer-events:none}.measure-warning-bg{fill:#fff1f0;stroke:#d84a4a;stroke-width:.8}.measure-warning-text{fill:#b42318;font:600 10px sans-serif;text-anchor:middle}.rest{font:20px serif;text-anchor:middle}.status{max-width:1200px;margin:10px auto;color:#536078;font-size:13px}
@@ -50,7 +50,7 @@
   <main>
     <article class="sheet" id="sheet" data-page="A4">
       <h1 class="score-title" id="printTitle"></h1><div class="credits"><span id="printLyricist"></span><span id="printComposer"></span></div>
-      <svg id="score" role="img" aria-label="오선 및 타브 악보 편집 영역"></svg>
+      <div id="score" role="img" aria-label="오선 및 타브 악보 편집 영역"></div>
     </article>
     <div class="status" id="status">빈 마디를 클릭한 뒤 키보드 A–G로 음표를 입력하세요. TAB 숫자를 클릭하면 바로 편집할 수 있습니다.</div>
   </main>

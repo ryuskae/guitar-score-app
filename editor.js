@@ -447,15 +447,18 @@ function render() {
         const direction=voiceIndex%2===0?VF.Stem.UP:VF.Stem.DOWN;
         const staffNotes=[],tabNotes=[];
         modelVoice.forEach((note)=>{
+          const chordMidis=note.pitches?.length?note.pitches:[note.midi];
+          const chordKeys=chordMidis.map(vexKey);
           let staveNote;
-          if(note.grace) staveNote=new VF.GraceNote({keys:[vexKey(note.midi)],duration:'16',slash:true,stem_direction:direction});
-          else staveNote=new VF.StaveNote({keys:[vexKey(note.midi)],duration:vexDuration(note,note.rest),stem_direction:direction});
-          if(!note.rest&&vexKey(note.midi).includes('#'))staveNote.addModifier(new VF.Accidental('#'));
+          if(note.grace) staveNote=new VF.GraceNote({keys:chordKeys,duration:'16',slash:true,stem_direction:direction});
+          else staveNote=new VF.StaveNote({keys:chordKeys,duration:vexDuration(note,note.rest),stem_direction:direction});
+          if(!note.rest)chordKeys.forEach((key,keyIndex)=>{if(key.includes('#'))staveNote.addModifier(new VF.Accidental('#'),keyIndex);});
           if(note.dotted)VF.Dot.buildAndAttach([staveNote],{all:true});
           const noteColor=active&&selected.has(note.id)?'#d97706':voiceColor;
           staveNote.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
           staffNotes.push(staveNote);staffById.set(note.id,staveNote);
-          const tabNote=note.rest?new VF.GhostNote({duration:vexDuration(note)}):new VF.TabNote({positions:[{str:note.string,fret:note.fret}],duration:vexDuration(note),stem_direction:direction},true);
+          const chordPositions=note.positions?.length?note.positions.map(({string,fret})=>({str:string,fret})):[{str:note.string,fret:note.fret}];
+          const tabNote=note.rest?new VF.GhostNote({duration:vexDuration(note)}):new VF.TabNote({positions:chordPositions,duration:vexDuration(note),stem_direction:direction},true);
           if(note.dotted&&!note.rest)VF.Dot.buildAndAttach([tabNote],{all:true});
           if(!note.rest)tabNote.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
           tabNotes.push(tabNote);tabById.set(note.id,tabNote);
@@ -888,7 +891,18 @@ function importMusicXml(text) {
       const importedDuration = Math.max(1, typeDuration || Math.round((xmlDuration / divisions) * 8 / (isDotted ? 1.5 : 1)));
       const note = noteFromStringFret(string, fret, importedDuration, isDotted, !!nx.querySelector('grace'));
       note.midi = fretNode && fresh.instrument !== 'piano' ? TUNING[string-1] + fret : midi + octaveChange * 12;
-      note.rest = !!nx.querySelector('rest'); m.voices[voice].push(note);
+      note.rest = !!nx.querySelector('rest');
+      if(nx.querySelector('chord')){
+        const previous=m.voices[voice].at(-1);
+        if(previous&&!previous.rest){
+          previous.pitches ||= [previous.midi];
+          previous.positions ||= [{string:previous.string,fret:previous.fret}];
+          previous.pitches.push(note.midi);
+          previous.positions.push({string:note.string,fret:note.fret});
+          return;
+        }
+      }
+      m.voices[voice].push(note);
     });
     if (mx.querySelector('print[new-system="yes"]') && fresh.measures.length) fresh.measures.at(-1).forceBreakAfter = true;
     fresh.measures.push(m);

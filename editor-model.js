@@ -29,7 +29,12 @@ export function createScore() {
 }
 
 export function durationTicks(note) {
-  return note.grace ? 0 : note.duration * (note.dotted ? 1.5 : 1);
+  if (note.grace) return 0;
+  if (Number.isFinite(note.ticks)) return note.ticks;
+  const dots=Number.isFinite(note.dots)?note.dots:(note.dotted?1:0);
+  let multiplier=1, fraction=.5;
+  for(let index=0;index<dots;index++){multiplier+=fraction;fraction/=2;}
+  return note.duration*multiplier;
 }
 
 export function measureTicks(measure, voice) {

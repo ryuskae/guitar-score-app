@@ -124,7 +124,7 @@ function noteFitsMeasure(measure, voice, note, dottedValue=note.dotted, duration
 function systems() {
   const groups = [];
   let current = [];
-  const perSystem = score.page === 'A3' ? 4 : score.page === 'Screen' ? 4 : 3;
+  const perSystem = Math.max(1, Math.min(6, Number(score.measuresPerSystem) || 3));
   score.measures.forEach((measure, index) => {
     current.push({ measure, index });
     if (measure.forceBreakAfter || current.length >= perSystem) {
@@ -323,7 +323,7 @@ function selectedIds() {
   const ids=new Set();
   if(!score.selection.noteId) return ids;
   if(!score.selection.rangeEnd){ids.add(score.selection.noteId);return ids;}
-  const ordered=selectionOrder();
+  const ordered=selectionOrder().filter((item)=>item.voice===score.selection.voice);
   let a=ordered.findIndex((item)=>item.note.id===score.selection.noteId);
   let b=ordered.findIndex((item)=>item.note.id===score.selection.rangeEnd.noteId);
   if(a<0||b<0)return ids;
@@ -411,7 +411,7 @@ function render() {
   sheet.dataset.page = score.page;
   const width = score.page === 'Screen' ? 1100 : score.page === 'A3' ? 1000 : 720;
   const sys = systems();
-  const systemHeight = 245, top = 5;
+  const systemHeight = Math.max(225, Math.min(320, Number(score.systemSpacing) || 245)), top = 5;
   scoreSvg.setAttribute('viewBox', `0 0 ${width} ${Math.max(220, top + sys.length * systemHeight)}`);
   scoreSvg.style.height = `${Math.max(220, top + sys.length * systemHeight)}px`;
   if(!VF){status.textContent='악보 렌더링 라이브러리를 불러오지 못했습니다.';return;}
@@ -442,6 +442,8 @@ function render() {
       const staffVoices=[],tabVoices=[],staffById=new Map(),tabById=new Map(),staffBeams=[],tabBeams=[];
       measure.voices.forEach((modelVoice,voiceIndex)=>{
         if(!modelVoice.length)return;
+        const active=voiceIndex===score.activeVoice;
+        const voiceColor=active?voiceColors[voiceIndex]:'#aeb4bf';
         const direction=voiceIndex%2===0?VF.Stem.UP:VF.Stem.DOWN;
         const staffNotes=[],tabNotes=[];
         modelVoice.forEach((note)=>{
@@ -450,11 +452,12 @@ function render() {
           else staveNote=new VF.StaveNote({keys:[vexKey(note.midi)],duration:vexDuration(note,note.rest),stem_direction:direction});
           if(!note.rest&&vexKey(note.midi).includes('#'))staveNote.addModifier(new VF.Accidental('#'));
           if(note.dotted)VF.Dot.buildAndAttach([staveNote],{all:true});
-          staveNote.setStyle({fillStyle:selected.has(note.id)?'#d97706':voiceColors[voiceIndex],strokeStyle:selected.has(note.id)?'#d97706':voiceColors[voiceIndex]});
+          const noteColor=active&&selected.has(note.id)?'#d97706':voiceColor;
+          staveNote.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
           staffNotes.push(staveNote);staffById.set(note.id,staveNote);
           const tabNote=note.rest?new VF.GhostNote({duration:vexDuration(note)}):new VF.TabNote({positions:[{str:note.string,fret:note.fret}],duration:vexDuration(note),stem_direction:direction},true);
           if(note.dotted&&!note.rest)VF.Dot.buildAndAttach([tabNote],{all:true});
-          if(!note.rest)tabNote.setStyle({fillStyle:selected.has(note.id)?'#d97706':voiceColors[voiceIndex],strokeStyle:selected.has(note.id)?'#d97706':voiceColors[voiceIndex]});
+          if(!note.rest)tabNote.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
           tabNotes.push(tabNote);tabById.set(note.id,tabNote);
         });
         const time={num_beats:score.timeSignature.beats,beat_value:score.timeSignature.beatType};
@@ -465,8 +468,8 @@ function render() {
         beam.groups.forEach((items)=>{
           const s=items.map(({note})=>staffById.get(note.id)).filter(Boolean);
           const t=items.map(({note})=>tabById.get(note.id)).filter((item)=>item&&!(item instanceof VF.GhostNote));
-          if(s.length>1)staffBeams.push(new VF.Beam(s,false));
-          if(t.length>1)tabBeams.push(new VF.Beam(t,false));
+          if(s.length>1)staffBeams.push(new VF.Beam(s,false).setStyle({fillStyle:voiceColor,strokeStyle:voiceColor}));
+          if(t.length>1)tabBeams.push(new VF.Beam(t,false).setStyle({fillStyle:voiceColor,strokeStyle:voiceColor}));
         });
       });
       const allVoices=[...staffVoices,...tabVoices];
@@ -524,6 +527,7 @@ function render() {
   }
   // Interaction rectangles are rebuilt from VexFlow's final, rhythm-aligned positions.
   selectionOrder().forEach(({note,measure,voice})=>{
+    if(voice!==score.activeVoice)return;
     const p=renderedNotes.get(note.id),layout=layouts.get(measure);if(!p||!layout)return;
     const sh=svg('rect',{x:p.x-13,y:layout.staffY-22,width:26,height:84,class:'hit'});
     sh.addEventListener('pointerdown',(e)=>beginRangeSelection(e,measure,voice,note.id,'staff'));
@@ -893,6 +897,8 @@ function syncMetadataInputs() {
   $('#page').value = score.page;
   $('#instrument').value = score.instrument;
   $('#textFont').value = score.textFont||'Georgia, serif';
+  $('#measuresPerSystem').value = String(score.measuresPerSystem||3);
+  $('#systemSpacing').value = String(score.systemSpacing||245);
   $('#timeSignature').value = `${score.timeSignature.beats}/${score.timeSignature.beatType}`;
 }
 
@@ -925,13 +931,15 @@ $('#barre').addEventListener('click', () => {
   const range=orderedSelection();
   if(!range){status.textContent='오선 또는 타브 위에서 첫 음표부터 마지막 음표까지 드래그한 뒤 바레를 누르세요.';return;}
   const value=$('#barreFret').value;
-  remember();score.annotations.push({type:'barre',...range,text:`C.${Math.max(1,Math.min(30,Number(value)||1))}`});render();
+  remember();score.annotations.push({type:'barre',...range,text:`C.${Math.max(1,Math.min(20,Number(value)||1))}`});render();
 });
 $('#undo').addEventListener('click', () => { if(!undoStack.length)return;score=undoStack.pop();syncMetadataInputs();updateControls();render(); });
 $('#clear').addEventListener('click', () => { remember();score.measures=[createMeasure()];score.annotations=[];score.selection={measure:0,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:0,rangeEnd:null};render(); });
 $('#page').addEventListener('change', (e) => { score.page=e.target.value;render(); });
 $('#instrument').addEventListener('change', (e) => { score.instrument=e.target.value;render(); });
 $('#textFont').addEventListener('change', (e) => { score.textFont=e.target.value;render(); });
+$('#measuresPerSystem').addEventListener('change', (e) => { score.measuresPerSystem=Number(e.target.value);render(); });
+$('#systemSpacing').addEventListener('change', (e) => { score.systemSpacing=Number(e.target.value);render(); });
 $('#timeSignature').addEventListener('change', (e) => { const [beats,beatType]=e.target.value.split('/').map(Number);score.timeSignature={beats,beatType};render(); });
 ['title','lyricist','composer'].forEach((key) => $(`#${key}`).addEventListener('input', (e) => { score.metadata[key]=e.target.value;render(); }));
 $('#xmlExport').addEventListener('click', () => download(`${score.metadata.title||'score'}.musicxml`,toMusicXml(),'application/vnd.recordare.musicxml+xml'));

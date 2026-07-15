@@ -6,6 +6,7 @@ import {
 const NS = 'http://www.w3.org/2000/svg';
 const $ = (s) => document.querySelector(s);
 const scoreSvg = $('#score');
+let notationSvg = null;
 const sheet = $('#sheet');
 const status = $('#status');
 const VF = window.Vex?.Flow;
@@ -32,7 +33,7 @@ let warningTimer = null;
 const PITCH_BY_CODE = { KeyA: 57, KeyB: 59, KeyC: 48, KeyD: 50, KeyE: 52, KeyF: 53, KeyG: 55 };
 const VOICE_COLORS = ['검정', '파랑', '빨강', '초록'];
 
-function svg(tag, attrs = {}, parent = scoreSvg) {
+function svg(tag, attrs = {}, parent = notationSvg || scoreSvg) {
   const el = document.createElementNS(NS, tag);
   for (const [key, value] of Object.entries(attrs)) {
     if (key === 'text') el.textContent = value;
@@ -444,6 +445,7 @@ function drawAnnotations(layouts) {
 
 function render() {
   scoreSvg.replaceChildren();
+  notationSvg=null;
   renderedNotes=new Map();
   $('#printTitle').textContent = score.metadata.title;
   $('#printLyricist').textContent = score.metadata.lyricist || '';
@@ -456,13 +458,13 @@ function render() {
   const sys = systems();
   const systemHeight = Math.max(225, Math.min(320, Number(score.systemSpacing) || 245))*densityScale, top = 5*densityScale;
   const logicalHeight=Math.max(220*densityScale,top+sys.length*systemHeight);
-  scoreSvg.setAttribute('viewBox', `0 0 ${width} ${logicalHeight}`);
   if(!VF){status.textContent='악보 렌더링 라이브러리를 불러오지 못했습니다.';return;}
   const context=new VF.SVGContext(scoreSvg).resize(width,logicalHeight);
-  scoreSvg.removeAttribute('height');
-  scoreSvg.style.height='auto';
-  scoreSvg.style.aspectRatio=`${width} / ${logicalHeight}`;
-  scoreSvg.setAttribute('preserveAspectRatio','xMinYMin meet');
+  notationSvg=scoreSvg.querySelector(':scope > svg');
+  notationSvg.setAttribute('viewBox',`0 0 ${width} ${logicalHeight}`);
+  notationSvg.removeAttribute('width');notationSvg.removeAttribute('height');
+  notationSvg.style.width='100%';notationSvg.style.height='auto';
+  notationSvg.setAttribute('preserveAspectRatio','xMinYMin meet');
   const layouts = new Map();
   const selected=selectedIds();
   const voiceColors=['#111','#2368c4','#b33a3a','#15805f'];
@@ -901,7 +903,7 @@ function buildPdf(jpegs, pageWidth, pageHeight, pixelWidth, pixelHeight) {
 
 function scoreImage() {
   return new Promise((resolve, reject) => {
-    const clone=scoreSvg.cloneNode(true);
+    const clone=notationSvg.cloneNode(true);
     clone.setAttribute('xmlns', NS);
     clone.querySelectorAll('.hit,.measure-hit,.selected-measure').forEach((node)=>node.remove());
     const style=document.createElementNS(NS,'style');

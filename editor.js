@@ -395,7 +395,7 @@ function drawAnnotations(layouts) {
         const bound = bounds.get(system);
         const y = bound.staffY + (ann.type === 'slur' ? 2 : 39);
         curve(x1, y, x2, y, ann.type === 'slur' ? y-rise : y+rise);
-        if (ann.type === 'slur' && score.instrument !== 'piano') {
+        if (ann.type === 'slur' && score.instrument !== 'piano' && score.showTab !== false) {
           const tabCurveY=bound.tabY-7; curve(x1, tabCurveY, x2, tabCurveY, tabCurveY-rise);
         }
       };
@@ -406,7 +406,7 @@ function drawAnnotations(layouts) {
         const y2 = b.noteY + (below ? 8 : -8);
         const control = below ? Math.max(y1,y2)+rise : Math.min(y1,y2)-rise;
         curve(a.x, y1, b.x, y2, control);
-        if (ann.type === 'slur' && score.instrument !== 'piano') {
+        if (ann.type === 'slur' && score.instrument !== 'piano' && score.showTab !== false) {
           const ty1=a.tabNoteY+(slurBelow?10:-10), ty2=b.tabNoteY+(slurBelow?10:-10);
           const tabControl=slurBelow?Math.max(ty1,ty2)+13:Math.min(ty1,ty2)-13;
           curve(a.tabX, ty1, b.tabX, ty2, tabControl);
@@ -459,7 +459,9 @@ function render() {
   const densityScale=Math.max(1,(Number(score.measuresPerSystem)||3)/3);
   const width = baseWidth*densityScale;
   const sys = systems();
-  const systemHeight = Math.max(225, Math.min(320, Number(score.systemSpacing) || 245))*densityScale, top = 5*densityScale;
+  const showLowerStaff=score.instrument==='piano'||score.showTab!==false;
+  const requestedSpacing=Math.max(225, Math.min(320, Number(score.systemSpacing) || 245));
+  const systemHeight = (showLowerStaff?requestedSpacing:Math.max(130,requestedSpacing*.58))*densityScale, top = 5*densityScale;
   const logicalHeight=Math.max(220*densityScale,top+sys.length*systemHeight);
   if(!VF){status.textContent='악보 렌더링 라이브러리를 불러오지 못했습니다.';return;}
   const context=new VF.SVGContext(scoreSvg).resize(width,logicalHeight);
@@ -480,21 +482,21 @@ function render() {
     items.forEach(({ measure, index }, localIndex) => {
       const x = left + localIndex * measureWidth;
       const staff=new VF.Stave(x,y,measureWidth);
-      const lower=piano?new VF.Stave(x,y+122*densityScale,measureWidth):new VF.TabStave(x,y+122*densityScale,measureWidth);
+      const lower=showLowerStaff?(piano?new VF.Stave(x,y+122*densityScale,measureWidth):new VF.TabStave(x,y+122*densityScale,measureWidth)):null;
       if(localIndex===0){
         staff.addClef('treble','default',piano?undefined:'8vb');
         if(Number.isFinite(score.keyFifths))staff.addKeySignature(KEY_BY_FIFTHS[Math.max(0,Math.min(14,score.keyFifths+7))]);
         staff.addTimeSignature(score.timeSymbol==='common'?'C':`${score.timeSignature.beats}/${score.timeSignature.beatType}`);
         if(systemIndex===0&&score.tempo)staff.setTempo({duration:'q',bpm:score.tempo},-18);
-        lower.addClef(piano?'bass':'tab');
+        lower?.addClef(piano?'bass':'tab');
         firstStaff=staff;firstLower=lower;
       }
-      if(measure.repeatStart){staff.setBegBarType(VF.Barline.type.REPEAT_BEGIN);lower.setBegBarType(VF.Barline.type.REPEAT_BEGIN);}
-      if(measure.repeatEnd){staff.setEndBarType(VF.Barline.type.REPEAT_END);lower.setEndBarType(VF.Barline.type.REPEAT_END);}
-      VF.Stave.formatBegModifiers([staff,lower]);
-      staff.setContext(context).draw();lower.setContext(context).draw();
+      if(measure.repeatStart){staff.setBegBarType(VF.Barline.type.REPEAT_BEGIN);lower?.setBegBarType(VF.Barline.type.REPEAT_BEGIN);}
+      if(measure.repeatEnd){staff.setEndBarType(VF.Barline.type.REPEAT_END);lower?.setEndBarType(VF.Barline.type.REPEAT_END);}
+      VF.Stave.formatBegModifiers(lower?[staff,lower]:[staff]);
+      staff.setContext(context).draw();lower?.setContext(context).draw();
       const staffTop=staff.getYForLine(0),staffBottom=staff.getYForLine(4);
-      const lowerTop=lower.getYForLine(0),lowerBottom=lower.getYForLine(piano?4:5);
+      const lowerTop=lower?.getYForLine(0)??staffTop,lowerBottom=lower?.getYForLine(piano?4:5)??staffBottom;
       layouts.set(index,{x,width:measureWidth,staffY:staffTop,tabY:lowerTop,lowerBottom,noteStart:staff.getNoteStartX(),noteEnd:staff.getNoteEndX(),system:systemIndex});
       const staffVoices=[],tabVoices=[],staffById=new Map(),tabById=new Map(),staffBeams=[],tabBeams=[],staffTuplets=[],tabTuplets=[];
       measure.voices.forEach((modelVoice,voiceIndex)=>{
@@ -517,15 +519,15 @@ function render() {
           const noteColor=active&&selected.has(note.id)?'#d97706':voiceColor;
           if(note.grace){
             const graceStaff=new VF.GraceNote({keys:chordKeys,duration:'16',slash:!!note.graceSlash,stem_direction:direction});
-            const graceTab=new VF.GraceTabNote({positions:chordPositions,duration:'16',stem_direction:direction});
+            const graceTab=lower?new VF.GraceTabNote({positions:chordPositions,duration:'16',stem_direction:direction}):null;
             chordKeys.forEach((key,keyIndex)=>{
               const importedAccidental=note.accidentals?.[keyIndex]??(keyIndex===0?note.accidental:null);
               const symbol={sharp:'#',flat:'b',natural:'n','double-sharp':'##','flat-flat':'bb'}[importedAccidental];
               if(symbol)graceStaff.addModifier(new VF.Accidental(symbol),keyIndex);
             });
-            graceStaff.setStyle({fillStyle:noteColor,strokeStyle:noteColor});graceTab.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
-            pendingStaffGrace.push(graceStaff);pendingTabGrace.push(graceTab);
-            staffById.set(note.id,graceStaff);tabById.set(note.id,graceTab);
+            graceStaff.setStyle({fillStyle:noteColor,strokeStyle:noteColor});graceTab?.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
+            pendingStaffGrace.push(graceStaff);if(graceTab)pendingTabGrace.push(graceTab);
+            staffById.set(note.id,graceStaff);if(graceTab)tabById.set(note.id,graceTab);
             return;
           }
           let staveNote;
@@ -541,28 +543,28 @@ function render() {
           if(note.fermata)staveNote.addModifier(new VF.Articulation('a@a').setPosition(VF.Modifier.Position.ABOVE));
           staveNote.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
           staffNotes.push(staveNote);staffById.set(note.id,staveNote);
-          const tabNote=note.rest?new VF.GhostNote({duration:vexDuration(note)}):new VF.TabNote({positions:chordPositions,duration:vexDuration(note),stem_direction:direction},true);
-          if(!note.rest)for(let dotIndex=0;dotIndex<dotCount;dotIndex++)VF.Dot.buildAndAttach([tabNote],{all:true});
-          if(!note.rest)tabNote.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
+          const tabNote=lower?(note.rest?new VF.GhostNote({duration:vexDuration(note)}):new VF.TabNote({positions:chordPositions,duration:vexDuration(note),stem_direction:direction},true)):null;
+          if(tabNote&&!note.rest)for(let dotIndex=0;dotIndex<dotCount;dotIndex++)VF.Dot.buildAndAttach([tabNote],{all:true});
+          if(tabNote&&!note.rest)tabNote.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
           if(pendingStaffGrace.length){
             const group=new VF.GraceNoteGroup(pendingStaffGrace,false);
             if(pendingStaffGrace.length>1)group.beamNotes();
             staveNote.addModifier(group);pendingStaffGrace=[];
           }
-          if(pendingTabGrace.length&&!note.rest){
+          if(tabNote&&pendingTabGrace.length&&!note.rest){
             const group=new VF.GraceNoteGroup(pendingTabGrace,false);
             if(pendingTabGrace.length>1)group.beamNotes();
             tabNote.addModifier(group);pendingTabGrace=[];
           }
-          tabNotes.push(tabNote);tabById.set(note.id,tabNote);
+          if(tabNote){tabNotes.push(tabNote);tabById.set(note.id,tabNote);}
           renderTick=Math.max(renderTick,startTick+durationTicks(note));
         });
         staffNotes.forEach((note)=>note.setStave(staff));
-        tabNotes.forEach((note)=>note.setStave(lower));
+        if(lower)tabNotes.forEach((note)=>note.setStave(lower));
         const time={num_beats:score.timeSignature.beats,beat_value:score.timeSignature.beatType};
         const sv=new VF.Voice(time).setMode(VF.Voice.Mode.SOFT).addTickables(staffNotes).setStave(staff);
-        const tv=new VF.Voice(time).setMode(VF.Voice.Mode.SOFT).addTickables(tabNotes).setStave(lower);
-        staffVoices.push(sv);tabVoices.push(tv);
+        const tv=lower?new VF.Voice(time).setMode(VF.Voice.Mode.SOFT).addTickables(tabNotes).setStave(lower):null;
+        staffVoices.push(sv);if(tv)tabVoices.push(tv);
         const beam=beamData(measure,voiceIndex);
         beam.groups.forEach((items)=>{
           const s=items.filter(({note})=>!note.grace).map(({note})=>staffById.get(note.id)).filter(Boolean);
@@ -594,8 +596,8 @@ function render() {
         const formatter=new VF.Formatter();
         if(staffVoices.length)formatter.joinVoices(staffVoices);
         if(tabVoices.length)formatter.joinVoices(tabVoices);
-        const start=Math.max(staff.getNoteStartX(),lower.getNoteStartX());
-        staffVoices.forEach((v)=>v.setStave(staff));tabVoices.forEach((v)=>v.setStave(lower));
+        const start=Math.max(staff.getNoteStartX(),lower?.getNoteStartX()??staff.getNoteStartX());
+        staffVoices.forEach((v)=>v.setStave(staff));if(lower)tabVoices.forEach((v)=>v.setStave(lower));
         formatter.format(allVoices,Math.max(30,staff.getNoteEndX()-start-8));
         staffVoices.forEach((v)=>v.draw(context,staff));tabVoices.forEach((v)=>v.draw(context,lower));
         staffBeams.forEach((beam)=>beam.setContext(context).draw());tabBeams.forEach((beam)=>beam.setContext(context).draw());
@@ -651,7 +653,7 @@ function render() {
     sh.addEventListener('pointerdown',(e)=>beginRangeSelection(e,measure,voice,note.id,'staff'));
     sh.addEventListener('pointerenter',()=>extendRangeSelection(measure,voice,note.id));
     sh.addEventListener('click',(e)=>{e.stopPropagation();if(ignoreNextClick){ignoreNextClick=false;return;}setSelection(measure,voice,note.id,e.shiftKey,'staff');});
-    if(score.instrument!=='piano'&&!note.rest){const th=svg('rect',{x:p.tabX-14,y:p.tabNoteY-11,width:28,height:22,class:'hit'});th.addEventListener('pointerdown',(e)=>beginRangeSelection(e,measure,voice,note.id,'tab'));th.addEventListener('pointerenter',()=>extendRangeSelection(measure,voice,note.id));th.addEventListener('click',(e)=>{e.stopPropagation();if(ignoreNextClick){ignoreNextClick=false;return;}setSelection(measure,voice,note.id,e.shiftKey,'tab');});}
+    if(score.instrument!=='piano'&&score.showTab!==false&&!note.rest){const th=svg('rect',{x:p.tabX-14,y:p.tabNoteY-11,width:28,height:22,class:'hit'});th.addEventListener('pointerdown',(e)=>beginRangeSelection(e,measure,voice,note.id,'tab'));th.addEventListener('pointerenter',()=>extendRangeSelection(measure,voice,note.id));th.addEventListener('click',(e)=>{e.stopPropagation();if(ignoreNextClick){ignoreNextClick=false;return;}setSelection(measure,voice,note.id,e.shiftKey,'tab');});}
   });
   drawAnnotations(layouts);
   const entry = selectedEntry();
@@ -666,6 +668,9 @@ function updateControls() {
   $('#doubleDot').classList.toggle('active', doubleDotted);
   $('#rest').classList.toggle('active', restMode);
   $('#grace').classList.toggle('active', graceMode || !!selectedEntry()?.note.grace);
+  $('#toggleTab').classList.toggle('active', score.showTab!==false);
+  $('#toggleTab').textContent=score.showTab===false?'타브 보이기':'타브 숨기기';
+  $('#toggleTab').disabled=score.instrument==='piano';
   document.querySelectorAll('[data-duration]').forEach((b) => b.classList.toggle('active', Number(b.dataset.duration) === duration));
 }
 
@@ -1015,6 +1020,63 @@ async function exportPdf() {
   }
 }
 
+function automaticTabForScore(targetScore) {
+  if(targetScore.instrument==='piano')return;
+  let previousCenter=3;
+  targetScore.measures.forEach((measure)=>{
+    const events=new Map();
+    measure.voices.forEach((voice,voiceIndex)=>voice.forEach((note)=>{
+      if(note.rest)return;
+      const tick=Number.isFinite(note.startTick)?note.startTick:notePosition(note,measure,voiceIndex);
+      // Grace notes precede the main beat and may legitimately reuse its string.
+      const key=note.grace?`${tick}:grace:${note.id}`:`${tick}:main`;
+      const pitches=note.pitches?.length?note.pitches:[note.midi];
+      const positions=note.positions?.length?note.positions:[{string:note.string,fret:note.fret}];
+      const imported=note.positionImported?.length?note.positionImported:[!!note.tabImported];
+      pitches.forEach((midi,index)=>{
+        const list=events.get(key)||[];
+        list.push({note,index,midi,position:positions[index],fixed:!!imported[index]});events.set(key,list);
+      });
+    }));
+    [...events.entries()].sort((a,b)=>Number.parseFloat(a[0])-Number.parseFloat(b[0])).forEach(([,items])=>{
+      const usedFixed=new Set(items.filter((item)=>item.fixed).map((item)=>item.position?.string));
+      const flexible=items.filter((item)=>!item.fixed);
+      let best=null;
+      const search=(index,used,chosen)=>{
+        if(index===flexible.length){
+          const all=[...items.filter((item)=>item.fixed).map((item)=>({item,position:item.position})),...chosen];
+          const frets=all.map(({position})=>position.fret),min=Math.min(...frets),max=Math.max(...frets);
+          const center=frets.reduce((sum,value)=>sum+value,0)/Math.max(1,frets.length);
+          let cost=frets.reduce((sum,value)=>sum+value*.7,0)+Math.abs(center-previousCenter)*1.8;
+          const span=max-min;cost+=span>4?(span-4)**2*15:span*.35;
+          all.forEach(({item,position})=>{cost+=Math.abs(position.string-(7-(item.midi-40)/5))*.08;});
+          for(let a=0;a<all.length;a++)for(let b=a+1;b<all.length;b++){
+            const high=all[a].item.midi>=all[b].item.midi?all[a]:all[b],low=high===all[a]?all[b]:all[a];
+            if(high.position.string>low.position.string)cost+=12;
+          }
+          if(!best||cost<best.cost)best={cost,all,center};
+          return;
+        }
+        const item=flexible[index];
+        const choices=positionsForMidi(item.midi).filter((position)=>position.fret<=20&&!used.has(position.string)).sort((a,b)=>a.fret-b.fret||a.string-b.string);
+        choices.forEach((position)=>{used.add(position.string);chosen.push({item,position});search(index+1,used,chosen);chosen.pop();used.delete(position.string);});
+      };
+      if(items.length<=6)search(0,new Set(usedFixed),[]);
+      if(!best){
+        const used=new Set(usedFixed),all=[];
+        flexible.forEach((item)=>{const position=positionsForMidi(item.midi).filter((candidate)=>candidate.fret<=20&&!used.has(candidate.string)).sort((a,b)=>a.fret-b.fret)[0]||positionsForMidi(item.midi).sort((a,b)=>a.fret-b.fret)[0];if(position){used.add(position.string);all.push({item,position});}});
+        best={all,center:all.length?all.reduce((sum,{position})=>sum+position.fret,0)/all.length:previousCenter};
+      }
+      best.all.filter(({item})=>!item.fixed).forEach(({item,position})=>{
+        const note=item.note;
+        if(note.pitches?.length){note.positions??=[];note.positions[item.index]=position;}
+        else{note.string=position.string;note.fret=position.fret;}
+      });
+      previousCenter=best.center;
+    });
+  });
+}
+
 function importMusicXml(text) {
   const doc = new DOMParser().parseFromString(text, 'application/xml');
   if (doc.querySelector('parsererror')) throw new Error('올바른 MusicXML 파일이 아닙니다.');
@@ -1028,7 +1090,7 @@ function importMusicXml(text) {
   fresh.tempo=Number(doc.querySelector('metronome per-minute')?.textContent||doc.querySelector('sound[tempo]')?.getAttribute('tempo')||0);
   const importedInstrument = (doc.querySelector('part-name')?.textContent || doc.querySelector('instrument-name')?.textContent || '').toLowerCase();
   fresh.instrument = importedInstrument.includes('piano') ? 'piano' : importedInstrument.includes('electric') ? 'electric-guitar' : importedInstrument.includes('acoustic') ? 'acoustic-guitar' : 'classical-guitar';
-  const octaveChange = Number(doc.querySelector('transpose octave-change')?.textContent || 0);
+  const octaveChange = Number(doc.querySelector('transpose octave-change')?.textContent || (fresh.instrument!=='piano'?doc.querySelector('clef[number="1"] clef-octave-change, clef clef-octave-change')?.textContent:0) || 0);
   let currentDivisions=Math.max(1,Number(doc.querySelector('divisions')?.textContent||1));
   const openSlurs=new Map();
   doc.querySelectorAll('part:first-of-type > measure').forEach((mx,measureIndex) => {
@@ -1052,7 +1114,8 @@ function importMusicXml(text) {
       const voice = Math.max(0, Math.min(3, Number(nx.querySelector('voice')?.textContent || 1)-1));
       const isChord=!!nx.querySelector(':scope > chord');
       const isGrace=!!nx.querySelector(':scope > grace');
-      const string = Number(nx.querySelector('technical string')?.textContent || 1);
+      const stringNode=nx.querySelector('technical string');
+      const string = Number(stringNode?.textContent || 1);
       const fretNode = nx.querySelector('technical fret');
       let midi;
       const pitch = nx.querySelector('pitch');
@@ -1068,6 +1131,8 @@ function importMusicXml(text) {
       const typeDuration = {whole:32,half:16,quarter:8,eighth:4,'16th':2,'32nd':1}[nx.querySelector('type')?.textContent];
       const importedDuration = Math.max(1, typeDuration || 8);
       const note = noteFromStringFret(string, fret, importedDuration, isDotted, isGrace);
+      note.tabImported=!!(stringNode&&fretNode);
+      note.positionImported=[note.tabImported];
       note.midi = fretNode && fresh.instrument !== 'piano' ? TUNING[string-1] + fret : midi + octaveChange * 12;
       note.rest = !!nx.querySelector('rest');
       note.dots=dots;note.ticks=actualTicks;
@@ -1086,6 +1151,8 @@ function importMusicXml(text) {
           previous.positions ||= [{string:previous.string,fret:previous.fret}];
           previous.pitches.push(note.midi);
           previous.positions.push({string:note.string,fret:note.fret});
+          previous.positionImported ||= [!!previous.tabImported];
+          previous.positionImported.push(note.tabImported);
           previous.accidentals ||= [previous.accidental||null];
           previous.accidentals.push(note.accidental);
           return;
@@ -1112,6 +1179,7 @@ function importMusicXml(text) {
     fresh.measures.push(m);
   });
   if (!fresh.measures.length) fresh.measures.push(createMeasure());
+  automaticTabForScore(fresh);
   remember(); score = fresh; syncMetadataInputs(); updateControls(); render();
 }
 
@@ -1167,6 +1235,7 @@ $('#beamToggle').addEventListener('click', toggleBeam);
 $('#fermata').addEventListener('click', () => {const entry=selectedEntry();if(!entry){status.textContent='페르마타를 붙일 음표나 쉼표를 선택하세요.';return;}remember();entry.note.fermata=!entry.note.fermata;render();});
 $('#repeatStart').addEventListener('click', () => toggleRepeat('repeatStart'));
 $('#repeatEnd').addEventListener('click', () => toggleRepeat('repeatEnd'));
+$('#toggleTab').addEventListener('click', () => {if(score.instrument==='piano')return;score.showTab=score.showTab===false;if(score.showTab===false&&score.selection.source==='tab')score.selection.source='staff';updateControls();render();});
 $('#barre').addEventListener('click', () => {
   const range=orderedSelection();
   if(!range){status.textContent='오선 또는 타브 위에서 첫 음표부터 마지막 음표까지 드래그한 뒤 바레를 누르세요.';return;}
@@ -1176,7 +1245,7 @@ $('#barre').addEventListener('click', () => {
 $('#undo').addEventListener('click', () => { if(!undoStack.length)return;score=undoStack.pop();syncMetadataInputs();updateControls();render(); });
 $('#clear').addEventListener('click', () => { remember();score.measures=[createMeasure()];score.annotations=[];score.selection={measure:0,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:0,rangeEnd:null};render(); });
 $('#page').addEventListener('change', (e) => { score.page=e.target.value;render(); });
-$('#instrument').addEventListener('change', (e) => { score.instrument=e.target.value;render(); });
+$('#instrument').addEventListener('change', (e) => { score.instrument=e.target.value;updateControls();render(); });
 $('#textFont').addEventListener('change', (e) => { score.textFont=e.target.value;render(); });
 $('#measuresPerSystem').addEventListener('change', (e) => { score.measuresPerSystem=Number(e.target.value);render(); });
 $('#systemSpacing').addEventListener('change', (e) => { score.systemSpacing=Number(e.target.value);render(); });

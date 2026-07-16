@@ -18,6 +18,7 @@ const TAB_VOICE_OFFSET = [0, 7, -7, 13];
 let score = createScore();
 let duration = 8;
 let dotted = false;
+let doubleDotted = false;
 let restMode = false;
 let graceMode = false;
 let fretBuffer = '';
@@ -117,9 +118,11 @@ function showMeasureWarning(measureIndex, message='마디의 박자 길이를 �
   warningTimer=setTimeout(()=>{measureWarning=null;render();},2600);
 }
 
-function noteFitsMeasure(measure, voice, note, dottedValue=note.dotted, durationValue=note.duration) {
+function dotMultiplier(count=0) { let value=1,part=.5;for(let i=0;i<count;i++){value+=part;part/=2;}return value; }
+
+function noteFitsMeasure(measure, voice, note, dotsValue=Number.isFinite(note.dots)?note.dots:(note.dotted?1:0), durationValue=note.duration) {
   const used=measure.voices[voice].reduce((sum,item)=>sum+(item.id===note.id?0:durationTicks(item)),0);
-  const proposed=note.grace?0:durationValue*(dottedValue?1.5:1);
+  const proposed=note.grace?0:durationValue*dotMultiplier(dotsValue);
   return used+proposed<=measureLimit();
 }
 
@@ -660,6 +663,7 @@ function render() {
 function updateControls() {
   $('#voice').textContent = `V${score.activeVoice+1}`;
   $('#dot').classList.toggle('active', dotted);
+  $('#doubleDot').classList.toggle('active', doubleDotted);
   $('#rest').classList.toggle('active', restMode);
   $('#grace').classList.toggle('active', graceMode || !!selectedEntry()?.note.grace);
   document.querySelectorAll('[data-duration]').forEach((b) => b.classList.toggle('active', Number(b.dataset.duration) === duration));
@@ -698,12 +702,13 @@ function addNote(midi) {
   let measure = score.measures[measureIndex];
   const cursorInsert=!score.selection.noteId&&Number.isFinite(score.selection.cursorTick);
   const targetTick=cursorInsert?Math.max(0,Math.min(measureLimit(),score.selection.cursorTick)):measureTicks(measure,score.activeVoice);
-  const newTicks=duration*(dotted?1.5:1);
+  const inputDots=doubleDotted?2:(dotted?1:0);
+  const newTicks=duration*dotMultiplier(inputDots);
   if(cursorInsert&&Math.max(measureTicks(measure,score.activeVoice),targetTick)+newTicks>measureLimit()){
     showMeasureWarning(measureIndex);return;
   }
   remember();
-  if (measureTicks(measure, score.activeVoice) + duration * (dotted ? 1.5 : 1) > measureLimit()) {
+  if (measureTicks(measure, score.activeVoice) + newTicks > measureLimit()) {
     measureIndex++;
     if (!score.measures[measureIndex]) score.measures.push(createMeasure());
     measure = score.measures[measureIndex];
@@ -712,6 +717,7 @@ function addNote(midi) {
   const insertionTick=cursorInsert&&measureIndex===score.selection.measure?targetTick:measureTicks(measure,score.activeVoice);
   const pos = bestPosition(midi,measure,score.activeVoice,insertionTick);
   const note = noteFromStringFret(pos.string, pos.fret, duration, dotted, graceMode);
+  note.dots=inputDots;note.dotted=inputDots>0;
   note.rest = restMode;
   const voice=measure.voices[score.activeVoice];
   if(cursorInsert&&measureIndex===score.selection.measure&&insertionTick<measureTicks(measure,score.activeVoice)){
@@ -730,6 +736,36 @@ function orderedSelection() {
   const end = score.selection.rangeEnd;
   if (!start) return null;
   return { start, end:end || start };
+}
+
+function selectedEntries(minimum=1) {
+  const ids=selectedIds();
+  let entries=selectionOrder().filter((item)=>ids.has(item.note.id));
+  if(entries.length===1&&minimum>1){
+    const all=selectionOrder().filter((item)=>item.voice===entries[0].voice&&item.measure===entries[0].measure);
+    const start=all.findIndex((item)=>item.note.id===entries[0].note.id);
+    entries=all.slice(start,start+minimum);
+  }
+  return entries;
+}
+
+function toggleRepeat(which) {
+  const measure=score.measures[score.selection.measure];if(!measure)return;
+  remember();measure[which]=!measure[which];render();
+}
+
+function toggleTuplet() {
+  const entries=selectedEntries(3).filter((item)=>!item.note.grace);
+  if(entries.length!==3){status.textContent='셋잇단음표로 묶을 같은 성부의 음표 세 개를 선택하세요.';return;}
+  const remove=entries.every(({note})=>note.tuplet?.actual===3&&note.tuplet?.normal===2);
+  remember();entries.forEach(({note})=>{if(remove){delete note.tuplet;delete note.ticks;}else{note.tuplet={actual:3,normal:2};note.ticks=note.duration*dotMultiplier(note.dots??(note.dotted?1:0))*2/3;}});render();
+}
+
+function toggleBeam() {
+  const entries=selectedEntries(2).filter(({note})=>!note.rest&&!note.grace&&note.duration<=4);
+  if(entries.length<2){status.textContent='빔으로 묶을 8분음표 이하의 음표를 둘 이상 선택하세요.';return;}
+  const remove=entries.every(({note})=>note.beams?.length);
+  remember();entries.forEach(({note},index)=>{if(remove)delete note.beams;else note.beams=[{number:1,value:index===0?'begin':index===entries.length-1?'end':'continue'},...(note.duration<=2?[{number:2,value:index===0?'begin':index===entries.length-1?'end':'continue'}]:[])];});render();
 }
 
 function addAnnotation(type) {
@@ -751,6 +787,7 @@ function addAnnotation(type) {
       }
       const duplicate=noteFromStringFret(entry.note.string,entry.note.fret,entry.note.duration,entry.note.dotted,false);
       duplicate.midi=entry.note.midi;
+      duplicate.dots=entry.note.dots??(entry.note.dotted?1:0);
       targetMeasure.voices[entry.voice].push(duplicate);
       next={note:duplicate,measure:targetMeasure,measureIndex:targetIndex,voice:entry.voice};
       range={start:range.start,end:{measure:targetIndex,voice:entry.voice,noteId:duplicate.id}};
@@ -838,15 +875,21 @@ const ALTER = [0,1,0,1,0,0,1,0,1,0,1,0];
 function toMusicXml() {
   const instrumentName = ({'classical-guitar':'Classical Guitar','acoustic-guitar':'Acoustic Guitar','electric-guitar':'Electric Guitar',piano:'Piano'})[score.instrument];
   const measures = score.measures.map((m, mi) => {
-    let body = `${mi > 0 && score.measures[mi-1].forceBreakAfter ? '<print new-system="yes"/>' : ''}${mi === 0 ? `<attributes><divisions>8</divisions><key><fifths>0</fifths></key><time><beats>${score.timeSignature.beats}</beats><beat-type>${score.timeSignature.beatType}</beat-type></time><staves>2</staves>${score.instrument==='piano'?'':'<transpose><diatonic>0</diatonic><chromatic>0</chromatic><octave-change>-1</octave-change></transpose>'}<clef number="1"><sign>G</sign><line>2</line></clef>${score.instrument==='piano'?'<clef number="2"><sign>F</sign><line>4</line></clef>':'<clef number="2"><sign>TAB</sign><line>5</line></clef><staff-details number="2"><staff-lines>6</staff-lines></staff-details>'}</attributes>` : ''}`;
+    let body = `${mi > 0 && score.measures[mi-1].forceBreakAfter ? '<print new-system="yes"/>' : ''}${mi === 0 ? `<attributes><divisions>8</divisions><key><fifths>${score.keyFifths||0}</fifths></key><time${score.timeSymbol==='common'?' symbol="common"':''}><beats>${score.timeSignature.beats}</beats><beat-type>${score.timeSignature.beatType}</beat-type></time><staves>2</staves>${score.instrument==='piano'?'':'<transpose><diatonic>0</diatonic><chromatic>0</chromatic><octave-change>-1</octave-change></transpose>'}<clef number="1"><sign>G</sign><line>2</line></clef>${score.instrument==='piano'?'<clef number="2"><sign>F</sign><line>4</line></clef>':'<clef number="2"><sign>TAB</sign><line>5</line></clef><staff-details number="2"><staff-lines>6</staff-lines></staff-details>'}</attributes>${score.tempo?`<direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${score.tempo}</per-minute></metronome></direction-type><sound tempo="${score.tempo}"/></direction>`:''}` : ''}`;
+    if(m.repeatStart)body+='<barline location="left"><repeat direction="forward"/></barline>';
+    m.directions?.forEach((direction)=>{body+=`<direction placement="${direction.placement||'above'}"><direction-type><words>${escapeXml(direction.text)}</words></direction-type></direction>`;});
     m.voices.forEach((voice, vi) => {
       if (vi && voice.length) body += `<backup><duration>${measureLimit()}</duration></backup>`;
       voice.forEach((n) => {
         const xmlMidi = score.instrument === 'piano' ? n.midi : n.midi + 12;
         const pc = ((xmlMidi%12)+12)%12, octave = Math.floor(xmlMidi/12)-1;
-        body += `<note>${n.grace?'<grace/>':''}${n.rest?'<rest/>':`<pitch><step>${STEP[pc]}</step>${ALTER[pc]?'<alter>1</alter>':''}<octave>${octave}</octave></pitch>`}${n.grace?'':`<duration>${durationTicks(n)}</duration>`}<voice>${vi+1}</voice><type>${({32:'whole',16:'half',8:'quarter',4:'eighth',2:'16th'})[n.duration]||'quarter'}</type>${n.dotted?'<dot/>':''}<staff>1</staff>${n.rest||score.instrument==='piano'?'':`<notations><technical><string>${n.string}</string><fret>${n.fret}</fret></technical></notations>`}</note>`;
+        const dots=n.dots??(n.dotted?1:0),notations=[];
+        if(!n.rest&&score.instrument!=='piano')notations.push(`<technical><string>${n.string}</string><fret>${n.fret}</fret></technical>`);
+        if(n.fermata)notations.push('<fermata/>');
+        body += `<note>${n.grace?`<grace${n.graceSlash?' slash="yes"':''}/>`:''}${n.rest?'<rest/>':`<pitch><step>${STEP[pc]}</step>${ALTER[pc]?'<alter>1</alter>':''}<octave>${octave}</octave></pitch>`}${n.grace?'':`<duration>${durationTicks(n)}</duration>`}<voice>${vi+1}</voice><type>${({32:'whole',16:'half',8:'quarter',4:'eighth',2:'16th',1:'32nd'})[n.duration]||'quarter'}</type>${'<dot/>'.repeat(dots)}${n.tuplet?`<time-modification><actual-notes>${n.tuplet.actual}</actual-notes><normal-notes>${n.tuplet.normal}</normal-notes></time-modification>`:''}<staff>1</staff>${n.beams?.map((beam)=>`<beam number="${beam.number}">${beam.value}</beam>`).join('')||''}${notations.length?`<notations>${notations.join('')}</notations>`:''}</note>`;
       });
     });
+    if(m.repeatEnd)body+='<barline location="right"><repeat direction="backward"/></barline>';
     return `<measure number="${mi+1}">${body}</measure>`;
   }).join('');
   return `<?xml version="1.0" encoding="UTF-8"?><score-partwise version="4.0"><work><work-title>${escapeXml(score.metadata.title)}</work-title></work><identification><creator type="composer">${escapeXml(score.metadata.composer)}</creator><creator type="lyricist">${escapeXml(score.metadata.lyricist)}</creator></identification><part-list><score-part id="P1"><part-name>${instrumentName}</part-name></score-part></part-list><part id="P1">${measures}</part></score-partwise>`;
@@ -1080,20 +1123,31 @@ function syncMetadataInputs() {
   $('#measuresPerSystem').value = String(score.measuresPerSystem||3);
   $('#systemSpacing').value = String(score.systemSpacing||245);
   $('#timeSignature').value = `${score.timeSignature.beats}/${score.timeSignature.beatType}`;
+  $('#keySignature').value = String(score.keyFifths||0);
+  $('#tempo').value = String(score.tempo||120);
 }
 
 document.querySelectorAll('[data-duration]').forEach((button) => button.addEventListener('click', () => { duration = Number(button.dataset.duration); updateControls(); }));
 $('#dot').addEventListener('click', () => {
   const entry=selectedEntry();
   if(entry){
-    const nextDotted=!entry.note.dotted;
-    if(!noteFitsMeasure(entry.measure,entry.voice,entry.note,nextDotted)){
+    const current=entry.note.dots??(entry.note.dotted?1:0),nextDots=current===1?0:1;
+    if(!noteFitsMeasure(entry.measure,entry.voice,entry.note,nextDots)){
       showMeasureWarning(entry.measureIndex);
       return;
     }
-    remember();entry.note.dotted=nextDotted;dotted=entry.note.dotted;
+    remember();entry.note.dots=nextDots;entry.note.dotted=nextDots>0;delete entry.note.ticks;dotted=nextDots===1;doubleDotted=false;
   }
-  else dotted=!dotted;
+  else {dotted=!dotted;if(dotted)doubleDotted=false;}
+  updateControls();render();
+});
+$('#doubleDot').addEventListener('click', () => {
+  const entry=selectedEntry();
+  if(entry){
+    const current=entry.note.dots??(entry.note.dotted?1:0),nextDots=current===2?0:2;
+    if(!noteFitsMeasure(entry.measure,entry.voice,entry.note,nextDots)){showMeasureWarning(entry.measureIndex);return;}
+    remember();entry.note.dots=nextDots;entry.note.dotted=nextDots>0;delete entry.note.ticks;doubleDotted=nextDots===2;dotted=false;
+  }else{doubleDotted=!doubleDotted;if(doubleDotted)dotted=false;}
   updateControls();render();
 });
 $('#rest').addEventListener('click', () => { restMode=!restMode; updateControls(); });
@@ -1107,6 +1161,12 @@ $('#voice').addEventListener('click', () => {
 $('#grace').addEventListener('click', () => { const e=selectedEntry();if(e){remember();e.note.grace=!e.note.grace;}else graceMode=!graceMode;updateControls();render(); });
 $('#tie').addEventListener('click', () => addAnnotation('tie'));
 $('#slur').addEventListener('click', () => addAnnotation('slur'));
+$('#hammerPull').addEventListener('click', () => addAnnotation('slur'));
+$('#triplet').addEventListener('click', toggleTuplet);
+$('#beamToggle').addEventListener('click', toggleBeam);
+$('#fermata').addEventListener('click', () => {const entry=selectedEntry();if(!entry){status.textContent='페르마타를 붙일 음표나 쉼표를 선택하세요.';return;}remember();entry.note.fermata=!entry.note.fermata;render();});
+$('#repeatStart').addEventListener('click', () => toggleRepeat('repeatStart'));
+$('#repeatEnd').addEventListener('click', () => toggleRepeat('repeatEnd'));
 $('#barre').addEventListener('click', () => {
   const range=orderedSelection();
   if(!range){status.textContent='오선 또는 타브 위에서 첫 음표부터 마지막 음표까지 드래그한 뒤 바레를 누르세요.';return;}
@@ -1121,6 +1181,9 @@ $('#textFont').addEventListener('change', (e) => { score.textFont=e.target.value
 $('#measuresPerSystem').addEventListener('change', (e) => { score.measuresPerSystem=Number(e.target.value);render(); });
 $('#systemSpacing').addEventListener('change', (e) => { score.systemSpacing=Number(e.target.value);render(); });
 $('#timeSignature').addEventListener('change', (e) => { const [beats,beatType]=e.target.value.split('/').map(Number);score.timeSignature={beats,beatType};render(); });
+$('#keySignature').addEventListener('change', (e) => {score.keyFifths=Number(e.target.value);render();});
+$('#tempo').addEventListener('change', (e) => {score.tempo=Math.max(20,Math.min(300,Number(e.target.value)||120));e.target.value=score.tempo;render();});
+$('#addDirection').addEventListener('click', () => {const text=$('#directionText').value.trim();if(!text)return;const measure=score.measures[score.selection.measure];remember();measure.directions??=[];measure.directions.push({text,placement:'above'});$('#directionText').value='';render();});
 ['title','lyricist','composer'].forEach((key) => $(`#${key}`).addEventListener('input', (e) => { score.metadata[key]=e.target.value;render(); }));
 $('#xmlExport').addEventListener('click', () => download(`${score.metadata.title||'score'}.musicxml`,toMusicXml(),'application/vnd.recordare.musicxml+xml'));
 $('#xmlImport').addEventListener('change', async (e) => { try{const file=e.target.files[0];if(file)importMusicXml(await file.text());}catch(err){alert(err.message);}e.target.value=''; });

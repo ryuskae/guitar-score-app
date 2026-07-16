@@ -476,11 +476,17 @@ function render() {
   sys.forEach((items, systemIndex) => {
     const y=top+systemIndex*systemHeight;
     const left=32*densityScale, usable=width-left-72*densityScale;
-    const measureWidth = usable / items.length;
+    // The first measure of every system also contains clef, key and time
+    // signature. Giving every measure the same width made a rhythmically busy
+    // first measure spill across the following barline.
+    const firstMeasureAllowance=Math.min(usable*.28,72*densityScale);
+    const regularMeasureWidth=Math.max(80,(usable-firstMeasureAllowance)/items.length);
+    let runningX=left;
     const piano = score.instrument === 'piano';
     let firstStaff=null,firstLower=null;
     items.forEach(({ measure, index }, localIndex) => {
-      const x = left + localIndex * measureWidth;
+      const measureWidth=regularMeasureWidth+(localIndex===0?firstMeasureAllowance:0);
+      const x=runningX;runningX+=measureWidth;
       const staff=new VF.Stave(x,y,measureWidth);
       const lower=showLowerStaff?(piano?new VF.Stave(x,y+122*densityScale,measureWidth):new VF.TabStave(x,y+122*densityScale,measureWidth)):null;
       if(localIndex===0){
@@ -1093,6 +1099,8 @@ function importMusicXml(text) {
   const octaveChange = Number(doc.querySelector('transpose octave-change')?.textContent || (fresh.instrument!=='piano'?doc.querySelector('clef[number="1"] clef-octave-change, clef clef-octave-change')?.textContent:0) || 0);
   let currentDivisions=Math.max(1,Number(doc.querySelector('divisions')?.textContent||1));
   const openSlurs=new Map();
+  const openTies=new Map();
+  const orphanTieStops=new Map();
   doc.querySelectorAll('part:first-of-type > measure').forEach((mx,measureIndex) => {
     const m = createMeasure();
     m.directions=[...mx.querySelectorAll(':scope > direction words')].map((words)=>({text:words.textContent.trim(),placement:words.closest('direction')?.getAttribute('placement')||'above'})).filter((item)=>item.text);
@@ -1144,6 +1152,7 @@ function importMusicXml(text) {
       const timeModification=nx.querySelector(':scope > time-modification');
       if(timeModification)note.tuplet={actual:Number(timeModification.querySelector('actual-notes')?.textContent||0),normal:Number(timeModification.querySelector('normal-notes')?.textContent||0)};
       note.fermata=!!nx.querySelector('fermata');
+      let storedNote=note;
       if(isChord){
         const previous=m.voices[voice].at(-1);
         if(previous&&!previous.rest){
@@ -1155,20 +1164,41 @@ function importMusicXml(text) {
           previous.positionImported.push(note.tabImported);
           previous.accidentals ||= [previous.accidental||null];
           previous.accidentals.push(note.accidental);
-          return;
+          storedNote=previous;
         }
       }
-      m.voices[voice].push(note);
-      lastStartByVoice.set(voice,note.startTick);
-      if(!isGrace)cursor+=actualTicks;
+      if(!isChord){
+        m.voices[voice].push(note);
+        lastStartByVoice.set(voice,note.startTick);
+        if(!isGrace)cursor+=actualTicks;
+      }
+      const relationRef={measure:measureIndex,voice,noteId:storedNote.id};
       nx.querySelectorAll('slur').forEach((slur)=>{
         const number=slur.getAttribute('number')||'1',type=slur.getAttribute('type');
-        if(type==='start')openSlurs.set(number,{measure:measureIndex,voice,noteId:note.id});
+        if(type==='start')openSlurs.set(number,relationRef);
         else if(type==='stop'&&openSlurs.has(number)){
-          fresh.annotations.push({type:'slur',start:openSlurs.get(number),end:{measure:measureIndex,voice,noteId:note.id}});
+          fresh.annotations.push({type:'slur',start:openSlurs.get(number),end:relationRef});
           openSlurs.delete(number);
         }
       });
+      const tieTypes=[...nx.querySelectorAll(':scope > tie')].map((tie)=>tie.getAttribute('type'));
+      const tieKey=`${voice}:${note.midi}`;
+      if(tieTypes.includes('stop')){
+        // Scanner-generated MusicXML occasionally changes the voice number at
+        // the second half of a tie. Recover it when the pitch has one unique
+        // open tie instead of silently dropping the curve.
+        let matchedKey=openTies.has(tieKey)?tieKey:null;
+        if(!matchedKey){const candidates=[...openTies.keys()].filter((key)=>key.endsWith(`:${note.midi}`));if(candidates.length===1)matchedKey=candidates[0];}
+        if(matchedKey){fresh.annotations.push({type:'tie',start:openTies.get(matchedKey),end:relationRef});openTies.delete(matchedKey);}
+        else orphanTieStops.set(note.midi,relationRef);
+      }
+      if(tieTypes.includes('start')){
+        // A second common scanner error is a reversed stop/start pair. If an
+        // unmatched stop of the same pitch occurred just before this start,
+        // preserve the visible tie in chronological order.
+        if(orphanTieStops.has(note.midi)){fresh.annotations.push({type:'tie',start:orphanTieStops.get(note.midi),end:relationRef});orphanTieStops.delete(note.midi);}
+        else openTies.set(tieKey,relationRef);
+      }
     });
     mx.querySelectorAll(':scope > barline').forEach((barline)=>{
       const direction=barline.querySelector('repeat')?.getAttribute('direction');

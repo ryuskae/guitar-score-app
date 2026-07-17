@@ -594,6 +594,7 @@ function render() {
       const staffTop=staff.getYForLine(0),staffBottom=staff.getYForLine(4);
       const lowerTop=lower?.getYForLine(0)??staffTop,lowerBottom=lower?.getYForLine(piano?4:5)??staffBottom;
       layouts.set(index,{x,width:measureWidth,staffY:staffTop,tabY:lowerTop,lowerBottom,noteStart:staff.getNoteStartX(),noteEnd:staff.getNoteEndX(),system:systemIndex});
+      if(systemIndex===0&&localIndex===0&&!showLowerStaff)svg('text',{x:2*densityScale,y:staffTop+STAFF_HEIGHT/2+5,text:score.instrument==='piano'?'Piano':'Guitar','font-size':12*densityScale,'font-family':'serif'});
       const staffVoices=[],tabVoices=[],staffById=new Map(),tabById=new Map(),staffBeams=[],tabBeams=[],staffTuplets=[],tabTuplets=[];
       measure.voices.forEach((modelVoice,voiceIndex)=>{
         if(!modelVoice.length)return;

@@ -19,6 +19,7 @@ let score = createScore();
 let duration = 8;
 let dotted = false;
 let doubleDotted = false;
+let pendingAccidental = 0;
 let restMode = false;
 let graceMode = false;
 let fretBuffer = '';
@@ -115,6 +116,67 @@ function noteAtTick(measure,voice,tick){
 }
 
 function measureLimit() { return timeSignatureTicks(score.timeSignature); }
+
+function restParts(totalTicks, startTick=0) {
+  const values=[32,24,16,12,8,6,4,3,2,1],parts=[];
+  let remaining=Math.max(0,totalTicks),tick=startTick;
+  for(const ticks of values){
+    while(remaining>=ticks-.001){
+      const dottedValue=[24,12,6,3].includes(ticks),base=dottedValue?ticks/1.5:ticks;
+      const note=noteFromStringFret(1,0,base,dottedValue,false);
+      note.rest=true;note.dots=dottedValue?1:0;note.startTick=tick;note.ticks=ticks;
+      parts.push(note);tick+=ticks;remaining-=ticks;
+    }
+  }
+  return parts;
+}
+
+function fullMeasureRest() {
+  const note=noteFromStringFret(1,0,32,false,false);
+  note.rest=true;note.measureRest=true;note.startTick=0;note.ticks=measureLimit();
+  return note;
+}
+
+function ensureEditableRests() {
+  score.measures.forEach((measure,index)=>{
+    if(measure.voices.every((voice)=>voice.length===0))measure.voices[0].push(fullMeasureRest());
+    if(index===score.selection.measure&&measure.voices[score.activeVoice].length===0)measure.voices[score.activeVoice].push(fullMeasureRest());
+  });
+  if(!score.selection.noteId){
+    const voice=score.measures[score.selection.measure]?.voices[score.activeVoice];
+    if(voice?.length===1&&voice[0].measureRest)score.selection.noteId=voice[0].id;
+  }
+}
+
+function materializeVoiceTicks(measure, voiceIndex) {
+  let tick=0;
+  measure.voices[voiceIndex].forEach((note)=>{
+    if(!Number.isFinite(note.startTick))note.startTick=tick;
+    tick=Math.max(tick,note.startTick+durationTicks(note));
+  });
+}
+
+function setNoteTicks(note, ticks) {
+  const values=new Map([[32,[32,0]],[24,[16,1]],[16,[16,0]],[12,[8,1]],[8,[8,0]],[6,[4,1]],[4,[4,0]],[3,[2,1]],[2,[2,0]],[1,[1,0]]]);
+  const value=values.get(Math.round(ticks));
+  if(!value)return false;
+  note.duration=value[0];note.dots=value[1];note.dotted=value[1]>0;note.ticks=Math.round(ticks);
+  return true;
+}
+
+function normalizeVoiceToMeasure(measure, voiceIndex) {
+  const limit=measureLimit(),voice=measure.voices[voiceIndex];
+  voice.sort((a,b)=>(a.startTick??0)-(b.startTick??0));
+  const kept=[];
+  voice.forEach((note)=>{
+    const start=Number(note.startTick)||0;
+    if(start>=limit-.001)return;
+    const remaining=limit-start;
+    if(durationTicks(note)>remaining+.001&&!setNoteTicks(note,remaining))return;
+    kept.push(note);
+  });
+  measure.voices[voiceIndex]=kept;
+}
 
 function showMeasureWarning(measureIndex, message='마디의 박자 길이를 초과할 수 없습니다.') {
   measureWarning={measureIndex,message};
@@ -329,6 +391,7 @@ const VEX_NAMES = ['c','c#','d','d#','e','f','f#','g','g#','a','a#','b'];
 const KEY_BY_FIFTHS = ['Cb','Gb','Db','Ab','Eb','Bb','F','C','G','D','A','E','B','F#','C#'];
 
 function vexDuration(note, rest=false) {
+  if(rest&&note.measureRest)return 'wr';
   const base = VEX_DURATION[note.duration] || 'q';
   const dots=Number.isFinite(note.dots)?note.dots:(note.dotted?1:0);
   return `${base}${'d'.repeat(dots)}${rest?'r':''}`;
@@ -453,6 +516,7 @@ function drawAnnotations(layouts) {
 }
 
 function render() {
+  ensureEditableRests();
   scoreSvg.replaceChildren();
   notationSvg=null;
   renderedNotes=new Map();
@@ -646,17 +710,6 @@ function render() {
       for(let s=a.system;s<=b.system;s++){const q=bounds.get(s),x1=s===a.system?a.x-13:q.left,x2=s===b.system?b.x+13:q.right;svg('rect',{x:x1,y:q.top,width:Math.max(4,x2-x1),height:q.bottom-q.top,class:'range-selection'});}
     }
   }
-  if(!score.selection.noteId){
-    const layout=layouts.get(score.selection.measure);
-    if(layout){
-      const cursorColors=['#d97706','#2368c4','#b33a3a','#15805f'];
-      const color=cursorColors[score.activeVoice]||cursorColors[0];
-      const tick=Math.max(0,Math.min(measureLimit(),score.selection.cursorTick??0));
-      const cursorX=layout.noteStart+(tick/measureLimit())*(layout.noteEnd-layout.noteStart);
-      svg('line',{x1:cursorX,y1:layout.staffY-9,x2:cursorX,y2:layout.lowerBottom+8,class:'voice-cursor',stroke:color});
-      svg('path',{d:`M${cursorX-5},${layout.staffY-13} H${cursorX+5} L${cursorX},${layout.staffY-7} Z`,class:'voice-cursor-head',fill:color});
-    }
-  }
   // Interaction rectangles are rebuilt from VexFlow's final, rhythm-aligned positions.
   selectionOrder().forEach(({note,measure,voice})=>{
     if(voice!==score.activeVoice)return;
@@ -678,6 +731,8 @@ function updateControls() {
   $('#voice').textContent = `V${score.activeVoice+1}`;
   $('#dot').classList.toggle('active', dotted);
   $('#doubleDot').classList.toggle('active', doubleDotted);
+  $('#sharp').classList.toggle('active', pendingAccidental===1);
+  $('#flat').classList.toggle('active', pendingAccidental===-1);
   $('#rest').classList.toggle('active', restMode);
   $('#grace').classList.toggle('active', graceMode || !!selectedEntry()?.note.grace);
   $('#toggleTab').classList.toggle('active', score.showTab!==false);
@@ -724,7 +779,8 @@ function keyAdjustedMidi(midi) {
 }
 
 function addNote(midi) {
-  midi=keyAdjustedMidi(midi);
+  const naturalMidi=midi;
+  midi=pendingAccidental?naturalMidi+pendingAccidental:keyAdjustedMidi(naturalMidi);
   let measureIndex = score.selection.measure;
   let measure = score.measures[measureIndex];
   const cursorInsert=!score.selection.noteId&&Number.isFinite(score.selection.cursorTick);
@@ -733,13 +789,17 @@ function addNote(midi) {
   const newTicks=duration*dotMultiplier(inputDots);
   const replacing=selectedEntry();
   if(replacing){
-    if(!noteFitsMeasure(replacing.measure,replacing.voice,replacing.note,inputDots,duration)){showMeasureWarning(replacing.measureIndex);return;}
     remember();
-    const position=bestPosition(midi,replacing.measure,replacing.voice,notePosition(replacing.note,replacing.measure,replacing.voice));
-    Object.assign(replacing.note,{midi,string:position.string,fret:position.fret,duration,dots:inputDots,dotted:inputDots>0,rest:restMode,grace:graceMode});
+    materializeVoiceTicks(replacing.measure,replacing.voice);
+    const start=replacing.note.startTick,oldTicks=durationTicks(replacing.note),delta=newTicks-oldTicks;
+    const position=bestPosition(midi,replacing.measure,replacing.voice,start);
+    if(delta>0)replacing.measure.voices[replacing.voice].forEach((note)=>{if(note.id!==replacing.note.id&&note.startTick>start)note.startTick+=delta;});
+    Object.assign(replacing.note,{midi,diatonicMidi:naturalMidi,accidental:pendingAccidental===1?'sharp':pendingAccidental===-1?'flat':null,string:position.string,fret:position.fret,duration,dots:inputDots,dotted:inputDots>0,rest:restMode,grace:graceMode,startTick:start,ticks:newTicks,measureRest:false});
     delete replacing.note.pitches;delete replacing.note.positions;delete replacing.note.positionImported;delete replacing.note.tabImported;
-    delete replacing.note.tuplet;delete replacing.note.ticks;
-    graceMode=false;score.selection.source='staff';score.selection.rangeEnd=null;updateControls();render();return;
+    delete replacing.note.tuplet;
+    if(delta<0)replacing.measure.voices[replacing.voice].push(...restParts(-delta,start+newTicks));
+    normalizeVoiceToMeasure(replacing.measure,replacing.voice);
+    graceMode=false;pendingAccidental=0;score.selection.source='staff';score.selection.rangeEnd=null;updateControls();render();return;
   }
   if(cursorInsert&&Math.max(measureTicks(measure,score.activeVoice),targetTick)+newTicks>measureLimit()){
     showMeasureWarning(measureIndex);return;
@@ -755,6 +815,7 @@ function addNote(midi) {
   const pos = bestPosition(midi,measure,score.activeVoice,insertionTick);
   const note = noteFromStringFret(pos.string, pos.fret, duration, dotted, graceMode);
   note.dots=inputDots;note.dotted=inputDots>0;
+  note.diatonicMidi=naturalMidi;note.accidental=pendingAccidental===1?'sharp':pendingAccidental===-1?'flat':null;
   note.rest = restMode;
   const voice=measure.voices[score.activeVoice];
   if(cursorInsert&&measureIndex===score.selection.measure&&insertionTick<measureTicks(measure,score.activeVoice)){
@@ -765,6 +826,7 @@ function addNote(midi) {
   score.selection = { measure:measureIndex, voice:score.activeVoice, noteId:note.id, source:'staff', cursorTick:insertionTick, rangeEnd:null };
   if (measureTicks(measure, score.activeVoice) >= measureLimit() && measureIndex === score.measures.length - 1) score.measures.push(createMeasure());
   graceMode = false;
+  pendingAccidental = 0;
   updateControls(); render();
 }
 
@@ -885,12 +947,28 @@ function changeFret(digit) {
   remember(); entry.note.fret = fret; entry.note.midi = TUNING[entry.note.string-1] + fret; render();
 }
 
+function applyAccidental(value) {
+  const entry=selectedEntry();
+  if(!entry||entry.note.rest){
+    pendingAccidental=pendingAccidental===value?0:value;
+    updateControls();return;
+  }
+  remember();
+  const oldDelta=entry.note.accidental==='sharp'?1:entry.note.accidental==='flat'?-1:0;
+  const natural=Number.isFinite(entry.note.diatonicMidi)?entry.note.diatonicMidi:entry.note.midi-oldDelta;
+  const midi=natural+value,position=bestPosition(midi,entry.measure,entry.voice,notePosition(entry.note,entry.measure,entry.voice));
+  Object.assign(entry.note,{midi,diatonicMidi:natural,accidental:value===1?'sharp':'flat',string:position.string,fret:position.fret});
+  pendingAccidental=0;render();
+}
+
 function deleteSelected() {
   const entry = selectedEntry(); if (!entry) return;
   remember();
-  entry.measure.voices[entry.voice] = entry.measure.voices[entry.voice].filter((n) => n.id !== entry.note.id);
+  const ticks=durationTicks(entry.note),start=notePosition(entry.note,entry.measure,entry.voice);
+  Object.assign(entry.note,{rest:true,grace:false,startTick:start,ticks,measureRest:start===0&&Math.abs(ticks-measureLimit())<.001});
+  delete entry.note.pitches;delete entry.note.positions;delete entry.note.positionImported;delete entry.note.tabImported;delete entry.note.tuplet;delete entry.note.accidental;delete entry.note.accidentals;
   score.annotations = score.annotations.filter((a) => a.start.noteId !== entry.note.id && a.end.noteId !== entry.note.id);
-  score.selection.noteId = null; render();
+  render();
 }
 
 function insertMeasureAfterSelection() {
@@ -1170,6 +1248,7 @@ function importMusicXml(text) {
       note.tabImported=!!(stringNode&&fretNode);
       note.positionImported=[note.tabImported];
       note.midi = fretNode && fresh.instrument !== 'piano' ? TUNING[string-1] + fret : midi + octaveChange * 12;
+      note.diatonicMidi=pitch?midi-Number(pitch.querySelector('alter')?.textContent||0)+octaveChange*12:note.midi;
       note.rest = !!nx.querySelector('rest');
       note.dots=dots;note.ticks=actualTicks;
       note.graceSlash=isGrace&&nx.querySelector(':scope > grace')?.getAttribute('slash')==='yes';
@@ -1276,6 +1355,8 @@ $('#doubleDot').addEventListener('click', () => {
   }else{doubleDotted=!doubleDotted;if(doubleDotted)dotted=false;}
   updateControls();render();
 });
+$('#sharp').addEventListener('click',()=>applyAccidental(1));
+$('#flat').addEventListener('click',()=>applyAccidental(-1));
 $('#rest').addEventListener('click', () => { restMode=!restMode; updateControls(); });
 $('#voice').addEventListener('click', () => {
   const entry=selectedEntry();
@@ -1320,6 +1401,8 @@ $('#helpDialog button').addEventListener('click', () => $('#helpDialog').close()
 
 document.addEventListener('keydown', (e) => {
   if (e.target?.matches?.('input,select,textarea') || $('#helpDialog').open) return;
+  if(e.code==='Equal'||e.key==='='){e.preventDefault();applyAccidental(1);return;}
+  if(e.code==='Minus'||e.key==='-'){e.preventDefault();applyAccidental(-1);return;}
   if (PITCH_BY_CODE[e.code] != null) { e.preventDefault(); addNote(PITCH_BY_CODE[e.code]); return; }
   if (e.code === 'Period' || e.code === 'NumpadDecimal') { e.preventDefault();$('#dot').click();return; }
   if (/^Digit\d$/.test(e.code) || /^Numpad\d$/.test(e.code)) {

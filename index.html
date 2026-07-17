@@ -35,7 +35,7 @@
     </div>
     <div class="toolbar">
       <button data-duration="32">온음표</button><button data-duration="16">2분</button><button data-duration="8" class="active">4분</button><button data-duration="4">8분</button><button data-duration="2">16분</button><button data-duration="1">32분</button>
-      <button id="dot" title="점음표">.</button><button id="doubleDot" title="겹점음표">겹점</button><button id="sharp" title="샵: = 키">♯ (=)</button><button id="flat" title="플랫: - 키">♭ (-)</button><button id="rest">쉼표</button><button id="voice">V1</button>
+      <button id="dot" title="점음표">.</button><button id="doubleDot" title="겹점음표">겹점</button><button id="sharp" title="샵: = 키">♯ (=)</button><button id="flat" title="플랫: - 키">♭ (-)</button><button id="rest">쉼표</button><button id="voice">V1</button><button id="addVoice" title="새 성부를 악보에 추가">성부 추가</button>
       <span class="sep"></span><button id="tie">타이</button><button id="slur">슬러</button><button id="hammerPull" title="기타 해머링·풀링 슬러">해머·풀링</button><button id="grace">꾸밈음</button><button id="triplet">셋잇단</button><button id="beamToggle">빔</button><button id="fermata">페르마타</button><button id="repeatStart">도돌이 시작</button><button id="repeatEnd">도돌이 끝</button><button id="barre">바레</button><label class="barre-control">C.<select id="barreFret" aria-label="바레 프렛"><option>1</option><option>2</option><option>3</option><option>4</option><option selected>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option><option>13</option><option>14</option><option>15</option><option>16</option><option>17</option><option>18</option><option>19</option><option>20</option></select></label>
       <button id="toggleTab" class="active" title="기타 타브 악보를 숨기거나 표시">타브 표시</button>
       <span class="sep"></span><button id="undo">실행 취소</button><button id="clear" class="danger">전체 지우기</button>
@@ -57,7 +57,7 @@
     </article>
     <div class="status" id="status">빈 마디를 클릭한 뒤 키보드 A–G로 음표를 입력하세요. TAB 숫자를 클릭하면 바로 편집할 수 있습니다.</div>
   </main>
-  <dialog id="helpDialog"><h3>키보드 입력</h3><p>A–G(한글 입력 상태에서도 물리 키 기준): 기본 한 옥타브 낮은 음 입력 · 1–5: 온음표, 2분음표, 4분음표, 8분음표, 16분음표 선택 · TAB 숫자 선택 중 숫자: 프렛 변경 · . : 점음표 켜기/끄기 · ←/→: 음표 또는 성부 입력 커서 이동 · 오선 선택 후 ↑/↓: 반음 이동 · TAB 선택 후 ↑/↓: 같은 음을 인접 줄로 이동 · Ctrl+↑/↓: 한 옥타브 이동 · Tab: 선택 마디 뒤에 새 마디 삽입 · Enter: 선택 마디 다음에서 줄바꿈 · V: 성부 전환 · Delete: 삭제 · 음표를 드래그: 범위 선택 후 바레</p><button autofocus>닫기</button></dialog>
+  <dialog id="helpDialog"><h3>키보드 입력</h3><p>A–G(한글 입력 상태에서도 물리 키 기준): 기본 한 옥타브 낮은 음 입력 · 1–5: 온음표, 2분음표, 4분음표, 8분음표, 16분음표 선택 · =: 샵 · -: 플랫 · TAB 숫자 선택 중 숫자: 프렛 변경 · . : 점음표 켜기/끄기 · ←/→: 음표 이동 · 오선 선택 후 ↑/↓: 반음 이동 · TAB 선택 후 ↑/↓: 같은 음을 인접 줄로 이동 · Ctrl+↑/↓: 한 옥타브 이동 · Tab: 선택 마디 뒤에 새 마디 삽입 · Enter: 선택 마디 다음에서 줄바꿈 · V: 이미 추가된 성부 전환 · Delete: 같은 길이의 쉼표로 변경 · 음표를 드래그: 범위 선택 후 바레</p><button autofocus>닫기</button></dialog>
   <script src="./vendor-vexflow.js"></script>
   <script type="module" src="./editor.js"></script>
 </body>

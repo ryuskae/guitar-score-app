@@ -534,9 +534,12 @@ function drawAnnotations(layouts) {
         });
       }
     } else if(ann.type==='ending'){
+      const firstLayout=layouts.get(ann.start.measure),lastLayout=layouts.get(ann.end.measure);
+      const x1=ann.measureSpan&&firstLayout?firstLayout.x:a.x-8;
+      const x2=ann.measureSpan&&lastLayout?lastLayout.x+lastLayout.width:b.x+13;
       const y=Math.min(a.topY,b.topY)-27;
-      svg('path',{d:`M${a.x-8},${y+8} V${y} H${b.x+13}${ann.closed?` V${y+8}`:''}`,class:'ending-line',fill:'none',stroke:'#222','stroke-width':1.5});
-      svg('text',{x:a.x-3,y:y-3,text:`${ann.number}.`,class:'ending-text','font-size':12*notationScale,'font-family':'serif'});
+      svg('path',{d:`M${x1},${y+8} V${y} H${x2}${ann.closed?` V${y+8}`:''}`,class:'ending-line',fill:'none',stroke:'#222','stroke-width':1.5});
+      svg('text',{x:x1+4,y:y-3,text:`${ann.number}.`,class:'ending-text','font-size':12*notationScale,'font-family':'serif'});
     } else if (ann.type === 'barre') {
       const barreY=(system,x1,x2)=>{
         const bound=bounds.get(system);
@@ -849,7 +852,9 @@ function addNote(midi) {
   const targetTick=cursorInsert?Math.max(0,Math.min(measureLimit(),score.selection.cursorTick)):measureTicks(measure,score.activeVoice);
   const inputDots=doubleDotted?2:(dotted?1:0);
   const newTicks=duration*dotMultiplier(inputDots);
-  const replacing=selectedEntry();
+  const selected=selectedEntry();
+  const caretRest=cursorInsert?noteAtTick(measure,score.activeVoice,targetTick):null;
+  const replacing=selected||(caretRest?.rest?{note:caretRest,measure,measureIndex,voice:score.activeVoice}:null);
   if(graceMode&&replacing&&!replacing.note.grace){
     remember();
     materializeVoiceTicks(replacing.measure,replacing.voice);
@@ -858,7 +863,7 @@ function addNote(midi) {
     Object.assign(grace,{midi,diatonicMidi:naturalMidi,accidental:pendingAccidental===1?'sharp':pendingAccidental===-1?'flat':null,dots:inputDots,dotted:inputDots>0,startTick:start,ticks:0,grace:true});
     const voice=replacing.measure.voices[replacing.voice],anchor=voice.findIndex((note)=>note.id===replacing.note.id);
     voice.splice(Math.max(0,anchor),0,grace);
-    pendingAccidental=0;score.selection.source='staff';score.selection.rangeEnd=null;updateControls();render();return;
+    pendingAccidental=0;dotted=false;doubleDotted=false;score.selection.source='staff';score.selection.rangeEnd=null;updateControls();render();return;
   }
   if(replacing){
     remember();
@@ -871,7 +876,13 @@ function addNote(midi) {
     delete replacing.note.tuplet;
     if(delta<0)replacing.measure.voices[replacing.voice].push(...restParts(-delta,start+newTicks));
     normalizeVoiceToMeasure(replacing.measure,replacing.voice);
-    pendingAccidental=0;score.selection.source='staff';score.selection.rangeEnd=null;updateControls();render();return;
+    let nextMeasure=replacing.measureIndex,nextTick=start+newTicks;
+    if(nextTick>=measureLimit()){
+      nextMeasure=replacing.measureIndex+1;nextTick=0;
+      if(!score.measures[nextMeasure])score.measures.push(createMeasure());
+    }
+    score.selection={measure:nextMeasure,voice:replacing.voice,noteId:null,source:'staff',cursorTick:nextTick,rangeEnd:null};
+    pendingAccidental=0;dotted=false;doubleDotted=false;updateControls();render();return;
   }
   if(cursorInsert&&Math.max(measureTicks(measure,score.activeVoice),targetTick)+newTicks>measureLimit()){
     showMeasureWarning(measureIndex);return;
@@ -895,10 +906,19 @@ function addNote(midi) {
     for(let i=0;i<voice.length;i++){if(tick>=insertionTick){index=i;break;}tick+=durationTicks(voice[i]);}
     voice.splice(index,0,note);
   }else voice.push(note);
-  score.selection = { measure:measureIndex, voice:score.activeVoice, noteId:note.id, source:'staff', cursorTick:insertionTick, rangeEnd:null };
+  let nextMeasure=measureIndex,nextTick=insertionTick+newTicks;
+  if(nextTick>=measureLimit()){
+    nextMeasure=measureIndex+1;nextTick=0;
+    if(!score.measures[nextMeasure])score.measures.push(createMeasure());
+  }
+  // A newly entered note advances the insertion caret. Clicking an existing
+  // note still selects it, so the next pitch replaces that selected event.
+  score.selection = { measure:nextMeasure, voice:score.activeVoice, noteId:null, source:'staff', cursorTick:nextTick, rangeEnd:null };
   if (measureTicks(measure, score.activeVoice) >= measureLimit() && measureIndex === score.measures.length - 1) score.measures.push(createMeasure());
   graceMode = false;
   pendingAccidental = 0;
+  dotted = false;
+  doubleDotted = false;
   updateControls(); render();
 }
 
@@ -975,6 +995,19 @@ function addRangeMark(type, extra={}) {
   const range=orderedSelection();
   if(!range){status.textContent='첫 음표부터 마지막 음표까지 드래그하여 범위를 선택하세요.';return;}
   remember();score.annotations.push({type,...range,...extra});render();
+}
+
+function addMeasureEnding(number){
+  const startMeasure=score.selection.measure;
+  const endMeasure=score.selection.rangeEnd?.measure??startMeasure;
+  const firstMeasure=Math.min(startMeasure,endMeasure),lastMeasure=Math.max(startMeasure,endMeasure);
+  const firstEntries=selectionOrder().filter((entry)=>entry.measure===firstMeasure);
+  const lastEntries=selectionOrder().filter((entry)=>entry.measure===lastMeasure);
+  if(!firstEntries.length||!lastEntries.length){status.textContent='반복 번호를 붙일 마디에 음표나 쉼표가 필요합니다.';return;}
+  const start=firstEntries[0],end=lastEntries[lastEntries.length-1];
+  remember();
+  score.annotations.push({type:'ending',number,closed:number===1,start:{measure:firstMeasure,voice:start.voice,noteId:start.note.id},end:{measure:lastMeasure,voice:end.voice,noteId:end.note.id},measureSpan:true});
+  render();
 }
 
 function addHairpin(type){
@@ -1538,8 +1571,8 @@ $('#crescendo').addEventListener('click',()=>addHairpin('crescendo'));
 $('#diminuendo').addEventListener('click',()=>addHairpin('diminuendo'));
 $('#repeatStart').addEventListener('click', () => toggleRepeat('repeatStart'));
 $('#repeatEnd').addEventListener('click', () => toggleRepeat('repeatEnd'));
-$('#ending1').addEventListener('click',()=>addRangeMark('ending',{number:1,closed:true}));
-$('#ending2').addEventListener('click',()=>addRangeMark('ending',{number:2,closed:false}));
+$('#ending1').addEventListener('click',()=>addMeasureEnding(1));
+$('#ending2').addEventListener('click',()=>addMeasureEnding(2));
 $('#toggleTab').addEventListener('click', () => {if(score.instrument==='piano')return;score.showTab=score.showTab===false;if(score.showTab===false&&score.selection.source==='tab')score.selection.source='staff';updateControls();render();});
 $('#barre').addEventListener('click', () => {
   const range=orderedSelection();

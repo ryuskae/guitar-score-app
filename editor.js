@@ -594,7 +594,6 @@ function render() {
       const staffTop=staff.getYForLine(0),staffBottom=staff.getYForLine(4);
       const lowerTop=lower?.getYForLine(0)??staffTop,lowerBottom=lower?.getYForLine(piano?4:5)??staffBottom;
       layouts.set(index,{x,width:measureWidth,staffY:staffTop,tabY:lowerTop,lowerBottom,noteStart:staff.getNoteStartX(),noteEnd:staff.getNoteEndX(),system:systemIndex});
-      if(systemIndex===0&&localIndex===0&&!showLowerStaff)svg('text',{x:2*densityScale,y:staffTop+STAFF_HEIGHT/2+5,text:score.instrument==='piano'?'Piano':'Guitar','font-size':12*densityScale,'font-family':'serif'});
       const staffVoices=[],tabVoices=[],staffById=new Map(),tabById=new Map(),staffBeams=[],tabBeams=[],staffTuplets=[],tabTuplets=[];
       measure.voices.forEach((modelVoice,voiceIndex)=>{
         if(!modelVoice.length)return;
@@ -1264,30 +1263,6 @@ function automaticTabForScore(targetScore) {
   });
 }
 
-function restoreSeptiembreReferenceDetails(targetScore) {
-  const noteCount=targetScore.measures.reduce((sum,measure)=>sum+measure.voices.reduce((voiceSum,voice)=>voiceSum+voice.length,0),0);
-  if(targetScore.measures.length!==57||noteCount<450||!/septiembre/i.test(targetScore.metadata.title||''))return;
-  if(/Maximo Diego Pujol/i.test(targetScore.metadata.composer||''))return;
-  targetScore.metadata.title='II . Septiembre';
-  targetScore.metadata.composer='Maximo Diego Pujol';
-  targetScore.tempo=0;targetScore.measuresPerSystem=4;targetScore.systemSpacing=225;targetScore.showTab=false;
-  const direction=(measure,text,placement='above',align='start')=>{targetScore.measures[measure-1].directions??=[];targetScore.measures[measure-1].directions.push({text,placement,align});};
-  direction(1,'Andante','above','system-left');direction(8,'C II');direction(11,'C VII');direction(14,'C VII');
-  direction(17,'poco piu mosso');direction(18,'C II');direction(26,'C II');direction(27,'C IV');
-  direction(33,'poco piu mosso');direction(39,'sub.','below');direction(44,'poco a poco','below','center');direction(45,'rit.','below');direction(56,'rit.','below','end');
-  const notes=(measure,voice=0)=>targetScore.measures[measure-1].voices[voice].filter((note)=>!note.rest&&!note.grace);
-  const markDynamic=(measure,value,voice=0)=>{const note=notes(measure,voice)[0]||notes(measure,0)[0];if(note)note.dynamic=value;};
-  markDynamic(11,'f',1);markDynamic(14,'mf');markDynamic(18,'mp',1);markDynamic(30,'f',1);
-  markDynamic(39,'p',1);markDynamic(46,'mf');markDynamic(52,'f',1);markDynamic(56,'pp',1);markDynamic(57,'ppp',1);
-  const ref=(measure,which='first',voice=0)=>{const list=notes(measure,voice);const note=which==='last'?list.at(-1):list[0];return note?{measure:measure-1,voice,noteId:note.id}:null;};
-  const ending=(number,startMeasure,endMeasure,closed)=>{const start=ref(startMeasure),end=ref(endMeasure,'last');if(start&&end)targetScore.annotations.push({type:'ending',number,start,end,closed});};
-  ending(1,12,12,true);ending(2,13,13,false);ending(1,52,53,true);ending(2,54,56,false);
-  const phrase=(startMeasure,endMeasure,voice=1)=>{const start=ref(startMeasure,'first',voice),end=ref(endMeasure,'last',voice);if(start&&end)targetScore.annotations.push({type:'slur',start,end});};
-  phrase(11,12);phrase(52,53);phrase(54,55);phrase(56,56);
-  [26,27,29].forEach((measure)=>{const note=notes(measure)[0];if(note)note.fermata=true;});
-  const finalBass=notes(57,1)[0];if(finalBass)finalBass.fermata='below';
-}
-
 function importMusicXml(text) {
   const doc = new DOMParser().parseFromString(text, 'application/xml');
   if (doc.querySelector('parsererror')) throw new Error('올바른 MusicXML 파일이 아닙니다.');
@@ -1443,7 +1418,6 @@ function importMusicXml(text) {
   fresh.voiceCount=Math.max(1,...fresh.measures.flatMap((measure)=>measure.voices.map((voice,index)=>voice.length?index+1:0)));
   if (!fresh.measures.length) fresh.measures.push(createMeasure());
   automaticTabForScore(fresh);
-  restoreSeptiembreReferenceDetails(fresh);
   remember(); score = fresh; syncMetadataInputs(); updateControls(); render();
 }
 
@@ -1529,7 +1503,7 @@ $('#systemSpacing').addEventListener('change', (e) => { score.systemSpacing=Numb
 $('#timeSignature').addEventListener('change', (e) => { const [beats,beatType]=e.target.value.split('/').map(Number);score.timeSignature={beats,beatType};render(); });
 $('#keySignature').addEventListener('change', (e) => {score.keyFifths=Number(e.target.value);render();});
 $('#tempo').addEventListener('change', (e) => {score.tempo=Math.max(20,Math.min(300,Number(e.target.value)||120));e.target.value=score.tempo;render();});
-$('#addDirection').addEventListener('click', () => {const text=$('#directionText').value.trim();if(!text)return;const measure=score.measures[score.selection.measure];remember();measure.directions??=[];measure.directions.push({text,placement:'above'});$('#directionText').value='';render();});
+$('#addDirection').addEventListener('click', () => {const text=$('#directionText').value.trim();if(!text)return;const measure=score.measures[score.selection.measure];remember();measure.directions??=[];measure.directions.push({text,placement:$('#directionPlacement').value,align:$('#directionAlign').value});$('#directionText').value='';render();});
 ['title','lyricist','composer'].forEach((key) => $(`#${key}`).addEventListener('input', (e) => { score.metadata[key]=e.target.value;render(); }));
 $('#xmlExport').addEventListener('click', () => download(`${score.metadata.title||'score'}.musicxml`,toMusicXml(),'application/vnd.recordare.musicxml+xml'));
 $('#xmlImport').addEventListener('change', async (e) => { try{const file=e.target.files[0];if(file)importMusicXml(await file.text());}catch(err){alert(err.message);}e.target.value=''; });

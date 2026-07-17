@@ -63,6 +63,11 @@ function setSelection(measure, voice, noteId = null, extend = false, source = 's
   } else {
     const targetMeasure=score.measures[measure];
     const targetNote=noteId?targetMeasure?.voices[voice]?.find((note)=>note.id===noteId):null;
+    if(targetNote){
+      duration=targetNote.duration;
+      const selectedDots=targetNote.dots??(targetNote.dotted?1:0);
+      dotted=selectedDots===1;doubleDotted=selectedDots===2;
+    }
     const cursorTick=targetNote?notePosition(targetNote,targetMeasure,voice):Math.min(measureLimit(),measureTicks(targetMeasure,voice));
     score.selection = { measure, voice, noteId, source, cursorTick, rangeEnd: null };
     score.activeVoice = voice;
@@ -217,7 +222,8 @@ function beamData(measure, voice) {
   const levels = new Map();
   const groups = [];
   const imported=measure.voices[voice];
-  if(imported.some((note)=>note.beams?.length)){
+  const conventionalFourFour=score.timeSignature.beats===4&&score.timeSignature.beatType===4;
+  if(imported.some((note)=>note.beams?.length)&&!conventionalFourFour){
     let current=[];
     const flush=()=>{if(current.length>1)groups.push(current);current=[];};
     imported.forEach((note)=>{
@@ -708,13 +714,33 @@ function appendRestsToTick(measure,voice,targetTick){
   }
 }
 
+function keyAdjustedMidi(midi) {
+  const fifths=Math.max(-7,Math.min(7,Number(score.keyFifths)||0));
+  const pc=((midi%12)+12)%12;
+  const sharpOrder=[5,0,7,2,9,4,11],flatOrder=[11,4,9,2,7,0,5];
+  if(fifths>0&&sharpOrder.slice(0,fifths).includes(pc))return midi+1;
+  if(fifths<0&&flatOrder.slice(0,-fifths).includes(pc))return midi-1;
+  return midi;
+}
+
 function addNote(midi) {
+  midi=keyAdjustedMidi(midi);
   let measureIndex = score.selection.measure;
   let measure = score.measures[measureIndex];
   const cursorInsert=!score.selection.noteId&&Number.isFinite(score.selection.cursorTick);
   const targetTick=cursorInsert?Math.max(0,Math.min(measureLimit(),score.selection.cursorTick)):measureTicks(measure,score.activeVoice);
   const inputDots=doubleDotted?2:(dotted?1:0);
   const newTicks=duration*dotMultiplier(inputDots);
+  const replacing=selectedEntry();
+  if(replacing){
+    if(!noteFitsMeasure(replacing.measure,replacing.voice,replacing.note,inputDots,duration)){showMeasureWarning(replacing.measureIndex);return;}
+    remember();
+    const position=bestPosition(midi,replacing.measure,replacing.voice,notePosition(replacing.note,replacing.measure,replacing.voice));
+    Object.assign(replacing.note,{midi,string:position.string,fret:position.fret,duration,dots:inputDots,dotted:inputDots>0,rest:restMode,grace:graceMode});
+    delete replacing.note.pitches;delete replacing.note.positions;delete replacing.note.positionImported;delete replacing.note.tabImported;
+    delete replacing.note.tuplet;delete replacing.note.ticks;
+    graceMode=false;score.selection.source='staff';score.selection.rangeEnd=null;updateControls();render();return;
+  }
   if(cursorInsert&&Math.max(measureTicks(measure,score.activeVoice),targetTick)+newTicks>measureLimit()){
     showMeasureWarning(measureIndex);return;
   }
@@ -1051,8 +1077,9 @@ function automaticTabForScore(targetScore) {
       const search=(index,used,chosen)=>{
         if(index===flexible.length){
           const all=[...items.filter((item)=>item.fixed).map((item)=>({item,position:item.position})),...chosen];
-          const frets=all.map(({position})=>position.fret),min=Math.min(...frets),max=Math.max(...frets);
-          const center=frets.reduce((sum,value)=>sum+value,0)/Math.max(1,frets.length);
+          const frets=all.map(({position})=>position.fret),fretted=frets.filter((fret)=>fret>0);
+          const min=fretted.length?Math.min(...fretted):previousCenter,max=fretted.length?Math.max(...fretted):previousCenter;
+          const center=fretted.length?fretted.reduce((sum,value)=>sum+value,0)/fretted.length:previousCenter;
           let cost=frets.reduce((sum,value)=>sum+value*.7,0)+Math.abs(center-previousCenter)*1.8;
           const span=max-min;cost+=span>4?(span-4)**2*15:span*.35;
           all.forEach(({item,position})=>{cost+=Math.abs(position.string-(7-(item.midi-40)/5))*.08;});
@@ -1071,7 +1098,8 @@ function automaticTabForScore(targetScore) {
       if(!best){
         const used=new Set(usedFixed),all=[];
         flexible.forEach((item)=>{const position=positionsForMidi(item.midi).filter((candidate)=>candidate.fret<=20&&!used.has(candidate.string)).sort((a,b)=>a.fret-b.fret)[0]||positionsForMidi(item.midi).sort((a,b)=>a.fret-b.fret)[0];if(position){used.add(position.string);all.push({item,position});}});
-        best={all,center:all.length?all.reduce((sum,{position})=>sum+position.fret,0)/all.length:previousCenter};
+        const fretted=all.map(({position})=>position.fret).filter((fret)=>fret>0);
+        best={all,center:fretted.length?fretted.reduce((sum,fret)=>sum+fret,0)/fretted.length:previousCenter};
       }
       best.all.filter(({item})=>!item.fixed).forEach(({item,position})=>{
         const note=item.note;
@@ -1321,7 +1349,7 @@ document.addEventListener('keydown', (e) => {
     render();
   }
   else if (e.code === 'KeyV') { e.preventDefault();$('#voice').click(); }
-  else if (e.code === 'Delete' || e.code === 'Backspace') { e.preventDefault();deleteSelected(); }
+  else if (e.code === 'Delete' || e.code === 'Backspace' || e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault();deleteSelected(); }
   else if (e.code === 'Escape') { score.selection.rangeEnd=null;render(); }
 });
 

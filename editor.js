@@ -31,6 +31,8 @@ let renderedNotes = new Map();
 let renderedSystemBreaks = [];
 let measureWarning = null;
 let warningTimer = null;
+let selectedAnnotation = -1;
+let hairpinDrag = null;
 
 // Keyboard letters enter the lower guitar octave by default: C3–B3.
 const PITCH_BY_CODE = { KeyA: 57, KeyB: 59, KeyC: 48, KeyD: 50, KeyE: 52, KeyF: 53, KeyG: 55 };
@@ -97,9 +99,36 @@ function extendRangeSelection(measure, voice, noteId) {
 }
 
 document.addEventListener('pointerup', () => {
+  hairpinDrag = null;
   if (dragMoved) ignoreNextClick = true;
   dragAnchor = null;
   dragMoved = false;
+});
+
+document.addEventListener('pointermove', (event) => {
+  if (!hairpinDrag || !notationSvg) return;
+  event.preventDefault();
+  const annotation=score.annotations[hairpinDrag.index];
+  if(!annotation)return;
+  const matrix=notationSvg.getScreenCTM?.();
+  let x=event.clientX,y=event.clientY;
+  if(matrix&&typeof DOMPoint!=='undefined'){
+    const point=new DOMPoint(x,y).matrixTransform(matrix.inverse());x=point.x;y=point.y;
+  }
+  const fixed=endpointFor(hairpinDrag.side==='start'?annotation.end:annotation.start);
+  const entries=selectionOrder().filter((entry)=>{
+    const rendered=renderedNotes.get(entry.note.id);
+    return entry.voice===hairpinDrag.voice&&rendered&&(!fixed||rendered.system===fixed.system);
+  });
+  const fixedIndex=entries.findIndex((entry)=>entry.note.id===(hairpinDrag.side==='start'?annotation.end.noteId:annotation.start.noteId));
+  const candidates=entries.filter((entry,index)=>hairpinDrag.side==='start'?index<fixedIndex:index>fixedIndex);
+  const nearest=candidates.reduce((best,entry)=>{
+    const rendered=renderedNotes.get(entry.note.id),distance=(rendered.x-x)**2+(rendered.noteY-y)**2;
+    return !best||distance<best.distance?{entry,distance}:best;
+  },null);
+  if(!nearest)return;
+  annotation[hairpinDrag.side]={measure:nearest.entry.measure,voice:nearest.entry.voice,noteId:nearest.entry.note.id};
+  render();
 });
 
 function notePosition(note, measure, voice) {
@@ -457,9 +486,9 @@ function drawAnnotations(layouts) {
       svg('text',{x:directionX,y:direction.placement==='below'?layout.tabY+82:layout.staffY-29-index*17*notationScale,text:direction.text,class:'music-direction','font-size':13*notationScale,'font-family':'serif','font-style':'italic','text-anchor':direction.align==='center'?'middle':'start'});
     });
   });
-  for (const ann of score.annotations) {
+  score.annotations.forEach((ann,annotationIndex) => {
     let a = endpointFor(ann.start), b = endpointFor(ann.end);
-    if (!a || !b) continue;
+    if (!a || !b) return;
     if (a.system > b.system || (a.system === b.system && a.x > b.x)) [a,b] = [b,a];
     if (ann.type === 'slur' || ann.type === 'tie') {
       const rise = ann.type === 'slur' ? 20 : 9;
@@ -491,10 +520,18 @@ function drawAnnotations(layouts) {
       }
     } else if(ann.type==='crescendo'||ann.type==='diminuendo'){
       const y=Math.max(a.bottomY,b.bottomY)+28,open=9;
+      let path;
       if(ann.type==='crescendo'){
-        svg('path',{d:`M${a.x},${y} L${b.x},${y-open} M${a.x},${y} L${b.x},${y+open}`,class:'hairpin',fill:'none',stroke:'#222','stroke-width':1.5});
+        path=svg('path',{d:`M${a.x},${y} L${b.x},${y-open} M${a.x},${y} L${b.x},${y+open}`,class:'hairpin',fill:'none',stroke:'#222','stroke-width':1.5});
       }else{
-        svg('path',{d:`M${a.x},${y-open} L${b.x},${y} M${a.x},${y+open} L${b.x},${y}`,class:'hairpin',fill:'none',stroke:'#222','stroke-width':1.5});
+        path=svg('path',{d:`M${a.x},${y-open} L${b.x},${y} M${a.x},${y+open} L${b.x},${y}`,class:'hairpin',fill:'none',stroke:'#222','stroke-width':1.5});
+      }
+      path.addEventListener('pointerdown',(event)=>{event.stopPropagation();selectedAnnotation=annotationIndex;render();});
+      if(selectedAnnotation===annotationIndex){
+        [['start',a.x],['end',b.x]].forEach(([side,cx])=>{
+          const handle=svg('circle',{cx,cy:y,r:5,class:'hairpin-handle'});
+          handle.addEventListener('pointerdown',(event)=>{event.preventDefault();event.stopPropagation();hairpinDrag={index:annotationIndex,side,voice:ann.start.voice};});
+        });
       }
     } else if(ann.type==='ending'){
       const y=Math.min(a.topY,b.topY)-27;
@@ -512,7 +549,7 @@ function drawAnnotations(layouts) {
       if (a.system === b.system){
         const y=barreY(a.system,a.x,b.x);
         svg('text',{x:a.x,y:y+4,class:'annotation-text',text:ann.text});
-        if(ann.start.noteId===ann.end.noteId)continue;
+        if(ann.start.noteId===ann.end.noteId)return;
         svg('path',{d:`M${a.x+labelWidth},${y} H${b.x+10} v9`,class:'barre'});
       } else {
         const startBound=bounds.get(a.system),startY=barreY(a.system,a.x,startBound.right);
@@ -526,7 +563,7 @@ function drawAnnotations(layouts) {
         svg('path', { d:`M${endBound.left+3},${endY} H${b.x+10} v9`, class:'barre' });
       }
     }
-  }
+  });
 }
 
 function render() {
@@ -940,6 +977,23 @@ function addRangeMark(type, extra={}) {
   remember();score.annotations.push({type,...range,...extra});render();
 }
 
+function addHairpin(type){
+  let range=orderedSelection();
+  if(!range){status.textContent='크레셴도나 디미누엔도를 시작할 음표를 먼저 선택하세요.';return;}
+  if(range.start.noteId===range.end.noteId){
+    const entries=selectionOrder().filter((entry)=>entry.voice===range.start.voice&&entry.measure===range.start.measure);
+    const index=entries.findIndex((entry)=>entry.note.id===range.start.noteId);
+    const next=entries[index+1];
+    if(!next){status.textContent='같은 마디 안에 길이를 정할 다음 음표가 필요합니다.';return;}
+    range.end={measure:next.measure,voice:next.voice,noteId:next.note.id};
+  }
+  remember();
+  score.annotations.push({type,...range});
+  selectedAnnotation=score.annotations.length-1;
+  status.textContent='파란 원형 손잡이를 좌우로 드래그해 길이를 조절하세요.';
+  render();
+}
+
 function moveSelection(delta) {
   const list = allNotes(score, score.activeVoice);
   const index = list.findIndex(({note}) => note.id === score.selection.noteId);
@@ -1124,7 +1178,7 @@ function scoreImage() {
   return new Promise((resolve, reject) => {
     const clone=notationSvg.cloneNode(true);
     clone.setAttribute('xmlns', NS);
-    clone.querySelectorAll('.hit,.measure-hit,.selected-measure').forEach((node)=>node.remove());
+    clone.querySelectorAll('.hit,.measure-hit,.selected-measure,.hairpin-handle').forEach((node)=>node.remove());
     clone.querySelectorAll('*').forEach((node)=>{
       for(const attr of ['fill','stroke','style']){
         const value=node.getAttribute(attr);if(!value)continue;
@@ -1480,8 +1534,8 @@ $('#triplet').addEventListener('click', toggleTuplet);
 $('#beamToggle').addEventListener('click', toggleBeam);
 $('#fermata').addEventListener('click', () => {const entry=selectedEntry();if(!entry){status.textContent='페르마타를 붙일 음표나 쉼표를 선택하세요.';return;}remember();entry.note.fermata=!entry.note.fermata;render();});
 $('#dynamic').addEventListener('change',(event)=>{const entry=selectedEntry(),value=event.target.value;if(!entry||!value){event.target.value='';return;}remember();entry.note.dynamic=value;event.target.value='';render();});
-$('#crescendo').addEventListener('click',()=>addRangeMark('crescendo'));
-$('#diminuendo').addEventListener('click',()=>addRangeMark('diminuendo'));
+$('#crescendo').addEventListener('click',()=>addHairpin('crescendo'));
+$('#diminuendo').addEventListener('click',()=>addHairpin('diminuendo'));
 $('#repeatStart').addEventListener('click', () => toggleRepeat('repeatStart'));
 $('#repeatEnd').addEventListener('click', () => toggleRepeat('repeatEnd'));
 $('#ending1').addEventListener('click',()=>addRangeMark('ending',{number:1,closed:true}));

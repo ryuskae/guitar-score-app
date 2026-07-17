@@ -23,7 +23,7 @@ export function createScore() {
   return {
     page: 'A4', instrument: 'classical-guitar', showTab: true, textFont: 'Georgia, serif', measuresPerSystem: 3, systemSpacing: 245, timeSignature: { beats: 4, beatType: 4 },
     metadata: { title: '', lyricist: '', composer: '' },
-    measures: [createMeasure()], annotations: [], activeVoice: 0,
+    measures: [createMeasure()], annotations: [], activeVoice: 0, voiceCount: 1,
     selection: { measure: 0, voice: 0, noteId: null, source: 'staff', cursorTick: 0, rangeEnd: null },
   };
 }

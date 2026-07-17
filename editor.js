@@ -59,6 +59,7 @@ function selectedEntry() {
 }
 
 function setSelection(measure, voice, noteId = null, extend = false, source = 'staff') {
+  document.activeElement?.blur?.();
   if (extend && score.selection.noteId) {
     score.selection.rangeEnd = { measure, voice, noteId };
   } else {
@@ -138,9 +139,9 @@ function fullMeasureRest() {
 }
 
 function ensureEditableRests() {
+  score.voiceCount=Math.max(1,Math.min(4,Number(score.voiceCount)||1));
   score.measures.forEach((measure,index)=>{
-    if(measure.voices.every((voice)=>voice.length===0))measure.voices[0].push(fullMeasureRest());
-    if(index===score.selection.measure&&measure.voices[score.activeVoice].length===0)measure.voices[score.activeVoice].push(fullMeasureRest());
+    for(let voice=0;voice<score.voiceCount;voice++)if(measure.voices[voice].length===0)measure.voices[voice].push(fullMeasureRest());
   });
   if(!score.selection.noteId){
     const voice=score.measures[score.selection.measure]?.voices[score.activeVoice];
@@ -727,8 +728,11 @@ function render() {
     : `성부 ${score.activeVoice+1}(${VOICE_COLORS[score.activeVoice]}) · ${score.selection.measure+1}마디 · ${Number((((score.selection.cursorTick??0)/(8*(4/score.timeSignature.beatType)))+1).toFixed(2))}박 위치`;
 }
 
+scoreSvg.addEventListener('pointerdown',()=>document.activeElement?.blur?.());
+
 function updateControls() {
   $('#voice').textContent = `V${score.activeVoice+1}`;
+  $('#addVoice').disabled=(score.voiceCount||1)>=4;
   $('#dot').classList.toggle('active', dotted);
   $('#doubleDot').classList.toggle('active', doubleDotted);
   $('#sharp').classList.toggle('active', pendingAccidental===1);
@@ -788,6 +792,16 @@ function addNote(midi) {
   const inputDots=doubleDotted?2:(dotted?1:0);
   const newTicks=duration*dotMultiplier(inputDots);
   const replacing=selectedEntry();
+  if(graceMode&&replacing&&!replacing.note.grace){
+    remember();
+    materializeVoiceTicks(replacing.measure,replacing.voice);
+    const start=replacing.note.startTick,position=bestPosition(midi,replacing.measure,replacing.voice,start);
+    const grace=noteFromStringFret(position.string,position.fret,duration,dotted,true);
+    Object.assign(grace,{midi,diatonicMidi:naturalMidi,accidental:pendingAccidental===1?'sharp':pendingAccidental===-1?'flat':null,dots:inputDots,dotted:inputDots>0,startTick:start,ticks:0,grace:true});
+    const voice=replacing.measure.voices[replacing.voice],anchor=voice.findIndex((note)=>note.id===replacing.note.id);
+    voice.splice(Math.max(0,anchor),0,grace);
+    pendingAccidental=0;score.selection.source='staff';score.selection.rangeEnd=null;updateControls();render();return;
+  }
   if(replacing){
     remember();
     materializeVoiceTicks(replacing.measure,replacing.voice);
@@ -799,7 +813,7 @@ function addNote(midi) {
     delete replacing.note.tuplet;
     if(delta<0)replacing.measure.voices[replacing.voice].push(...restParts(-delta,start+newTicks));
     normalizeVoiceToMeasure(replacing.measure,replacing.voice);
-    graceMode=false;pendingAccidental=0;score.selection.source='staff';score.selection.rangeEnd=null;updateControls();render();return;
+    pendingAccidental=0;score.selection.source='staff';score.selection.rangeEnd=null;updateControls();render();return;
   }
   if(cursorInsert&&Math.max(measureTicks(measure,score.activeVoice),targetTick)+newTicks>measureLimit()){
     showMeasureWarning(measureIndex);return;
@@ -1315,6 +1329,7 @@ function importMusicXml(text) {
     if (mx.querySelector('print[new-system="yes"]') && fresh.measures.length) fresh.measures.at(-1).forceBreakAfter = true;
     fresh.measures.push(m);
   });
+  fresh.voiceCount=Math.max(1,...fresh.measures.flatMap((measure)=>measure.voices.map((voice,index)=>voice.length?index+1:0)));
   if (!fresh.measures.length) fresh.measures.push(createMeasure());
   automaticTabForScore(fresh);
   remember(); score = fresh; syncMetadataInputs(); updateControls(); render();
@@ -1361,11 +1376,17 @@ $('#rest').addEventListener('click', () => { restMode=!restMode; updateControls(
 $('#voice').addEventListener('click', () => {
   const entry=selectedEntry();
   const cursorTick=entry?notePosition(entry.note,entry.measure,entry.voice):(score.selection.cursorTick??0);
-  score.activeVoice=(score.activeVoice+1)%4;
+  score.activeVoice=(score.activeVoice+1)%Math.max(1,score.voiceCount||1);
   score.selection={measure:score.selection.measure,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:Math.min(measureLimit(),cursorTick),rangeEnd:null};
   updateControls();render();
 });
-$('#grace').addEventListener('click', () => { const e=selectedEntry();if(e){remember();e.note.grace=!e.note.grace;}else graceMode=!graceMode;updateControls();render(); });
+$('#addVoice').addEventListener('click',()=>{
+  const current=Math.max(1,score.voiceCount||1);if(current>=4)return;
+  remember();score.voiceCount=current+1;score.activeVoice=current;
+  score.selection={measure:score.selection.measure,voice:current,noteId:null,source:'staff',cursorTick:0,rangeEnd:null};
+  render();
+});
+$('#grace').addEventListener('click', () => {graceMode=!graceMode;updateControls();render();});
 $('#tie').addEventListener('click', () => addAnnotation('tie'));
 $('#slur').addEventListener('click', () => addAnnotation('slur'));
 $('#hammerPull').addEventListener('click', () => addAnnotation('slur'));

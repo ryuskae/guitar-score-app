@@ -498,7 +498,7 @@ function drawAnnotations(layouts) {
         const bound = bounds.get(system);
         const y=bound.staffY+(below?57:-5);
         curve(x1,y,x2,y,below?y+rise:y-rise);
-        if (ann.type === 'slur' && score.instrument !== 'piano' && score.showTab !== false) {
+        if ((ann.type === 'slur'||ann.type === 'tie') && score.instrument !== 'piano' && score.showTab !== false) {
           const tabCurveY=bound.tabY+(below?73:-7);curve(x1,tabCurveY,x2,tabCurveY,below?tabCurveY+rise:tabCurveY-rise);
         }
       };
@@ -507,7 +507,7 @@ function drawAnnotations(layouts) {
         const y2 = b.noteY + (below ? 8 : -8);
         const control = below ? Math.max(y1,y2)+rise : Math.min(y1,y2)-rise;
         curve(a.x, y1, b.x, y2, control);
-        if (ann.type === 'slur' && score.instrument !== 'piano' && score.showTab !== false) {
+        if ((ann.type === 'slur'||ann.type === 'tie') && score.instrument !== 'piano' && score.showTab !== false) {
           const ty1=a.tabNoteY+(below?10:-10), ty2=b.tabNoteY+(below?10:-10);
           const tabControl=below?Math.max(ty1,ty2)+13:Math.min(ty1,ty2)-13;
           curve(a.tabX, ty1, b.tabX, ty2, tabControl);
@@ -735,6 +735,15 @@ function render() {
         const start=Math.max(staff.getNoteStartX(),lower?.getNoteStartX()??staff.getNoteStartX());
         staffVoices.forEach((v)=>v.setStave(staff));if(lower)tabVoices.forEach((v)=>v.setStave(lower));
         formatter.format(allVoices,Math.max(30,staff.getNoteEndX()-start-8));
+        // TAB voices already share an exact rhythmic grid. Reuse that grid on
+        // the staff so accidentals and VexFlow's collision avoidance cannot
+        // make simultaneous notes in different voices appear at different beats.
+        if(lower&&!piano)measure.voices.forEach((voice)=>voice.forEach((note)=>{
+          const staffNote=staffById.get(note.id),tabNote=tabById.get(note.id);
+          if(!staffNote||!tabNote||note.grace||note.rest)return;
+          const shift=(staffNote.getXShift?.()||0)+(tabNote.getAbsoluteX()-staffNote.getAbsoluteX());
+          staffNote.setXShift?.(shift);
+        }));
         staffVoices.forEach((v)=>v.draw(context,staff));tabVoices.forEach((v)=>v.draw(context,lower));
         staffBeams.forEach((beam)=>beam.setContext(context).draw());tabBeams.forEach((beam)=>beam.setContext(context).draw());
         staffTuplets.forEach((tuplet)=>tuplet.setContext(context).draw());tabTuplets.forEach((tuplet)=>tuplet.setContext(context).draw());
@@ -750,7 +759,7 @@ function render() {
           if(note.dynamic)svg('text',{x:noteX-5,y:bottomY+23*densityScale,text:note.dynamic,class:'dynamic-mark','font-size':15*densityScale,'font-family':'serif','font-style':'italic','font-weight':'bold'});
         }));
       }
-      if(localIndex===0)svg('text',{x:x+5,y:staffTop-8,text:String(index+1),'font-size':9,fill:'#65718a'});
+      if(localIndex===0)svg('text',{x:x+3,y:staffTop-12,text:String(index+1),class:'measure-number','font-size':11,'font-family':'Arial, sans-serif','font-weight':'700',fill:'#4b5870'});
       if(measureWarning?.measureIndex===index){
         const warningWidth=Math.min(measureWidth-12,210),warningX=x+(measureWidth-warningWidth)/2;
         svg('rect',{x:warningX,y:staffTop-37,width:warningWidth,height:21,rx:5,class:'measure-warning-bg'});
@@ -776,11 +785,11 @@ function render() {
   selectionOrder().forEach(({note,measure,voice})=>{
     if(voice!==score.activeVoice)return;
     const p=renderedNotes.get(note.id),layout=layouts.get(measure);if(!p||!layout)return;
-    const sh=svg('rect',{x:p.x-13,y:layout.staffY-22,width:26,height:84,class:'hit'});
+    const sh=svg('rect',{x:p.x-13,y:layout.staffY-22,width:26,height:84,class:'hit','data-note-id':note.id,'data-measure':measure,'data-voice':voice,'data-source':'staff'});
     sh.addEventListener('pointerdown',(e)=>beginRangeSelection(e,measure,voice,note.id,'staff'));
     sh.addEventListener('pointerenter',()=>extendRangeSelection(measure,voice,note.id));
     sh.addEventListener('click',(e)=>{e.stopPropagation();if(ignoreNextClick){ignoreNextClick=false;return;}setSelection(measure,voice,note.id,e.shiftKey,'staff');});
-    if(score.instrument!=='piano'&&score.showTab!==false&&!note.rest){const th=svg('rect',{x:p.tabX-14,y:p.tabNoteY-11,width:28,height:22,class:'hit'});th.addEventListener('pointerdown',(e)=>beginRangeSelection(e,measure,voice,note.id,'tab'));th.addEventListener('pointerenter',()=>extendRangeSelection(measure,voice,note.id));th.addEventListener('click',(e)=>{e.stopPropagation();if(ignoreNextClick){ignoreNextClick=false;return;}setSelection(measure,voice,note.id,e.shiftKey,'tab');});}
+    if(score.instrument!=='piano'&&score.showTab!==false&&!note.rest){const th=svg('rect',{x:p.tabX-14,y:p.tabNoteY-11,width:28,height:22,class:'hit','data-note-id':note.id,'data-measure':measure,'data-voice':voice,'data-source':'tab'});th.addEventListener('pointerdown',(e)=>beginRangeSelection(e,measure,voice,note.id,'tab'));th.addEventListener('pointerenter',()=>extendRangeSelection(measure,voice,note.id));th.addEventListener('click',(e)=>{e.stopPropagation();if(ignoreNextClick){ignoreNextClick=false;return;}setSelection(measure,voice,note.id,e.shiftKey,'tab');});}
   });
   drawAnnotations(layouts);
   const entry = selectedEntry();
@@ -789,7 +798,11 @@ function render() {
     : `성부 ${score.activeVoice+1}(${VOICE_COLORS[score.activeVoice]}) · ${score.selection.measure+1}마디 · ${Number((((score.selection.cursorTick??0)/(8*(4/score.timeSignature.beatType)))+1).toFixed(2))}박 위치`;
 }
 
-scoreSvg.addEventListener('pointerdown',()=>document.activeElement?.blur?.());
+scoreSvg.setAttribute('tabindex','0');
+scoreSvg.addEventListener('pointerdown',()=>{
+  document.activeElement?.blur?.();
+  scoreSvg.focus?.({preventScroll:true});
+},{capture:true});
 
 function updateControls() {
   $('#voice').textContent = `V${score.activeVoice+1}`;
@@ -1593,7 +1606,7 @@ $('#tempo').addEventListener('change', (e) => {score.tempo=Math.max(20,Math.min(
 $('#addDirection').addEventListener('click', () => {const text=$('#directionText').value.trim();if(!text)return;const measure=score.measures[score.selection.measure];remember();measure.directions??=[];measure.directions.push({text,placement:$('#directionPlacement').value,align:$('#directionAlign').value});$('#directionText').value='';render();});
 ['title','lyricist','composer'].forEach((key) => $(`#${key}`).addEventListener('input', (e) => { score.metadata[key]=e.target.value;render(); }));
 $('#xmlExport').addEventListener('click', () => download(`${score.metadata.title||'score'}.musicxml`,toMusicXml(),'application/vnd.recordare.musicxml+xml'));
-$('#xmlImport').addEventListener('change', async (e) => { try{const file=e.target.files[0];if(file)importMusicXml(await file.text());}catch(err){alert(err.message);}e.target.value=''; });
+$('#xmlImport').addEventListener('change', async (e) => { try{const file=e.target.files[0];if(file)importMusicXml(await file.text());}catch(err){alert(err.message);}e.target.value='';scoreSvg.focus?.({preventScroll:true}); });
 $('#pdf').addEventListener('click', exportPdf);
 $('#help').addEventListener('click', () => $('#helpDialog').showModal());
 $('#helpDialog button').addEventListener('click', () => $('#helpDialog').close());
@@ -1602,6 +1615,8 @@ document.addEventListener('keydown', (e) => {
   if (e.target?.matches?.('input,select,textarea') || $('#helpDialog').open) return;
   if(e.code==='Equal'||e.key==='='){e.preventDefault();applyAccidental(1);return;}
   if(e.code==='Minus'||e.key==='-'){e.preventDefault();applyAccidental(-1);return;}
+  if(e.code==='BracketLeft'||e.key==='['){e.preventDefault();toggleRepeat('repeatStart');return;}
+  if(e.code==='BracketRight'||e.key===']'){e.preventDefault();toggleRepeat('repeatEnd');return;}
   if (PITCH_BY_CODE[e.code] != null) { e.preventDefault(); addNote(PITCH_BY_CODE[e.code]); return; }
   if (e.code === 'Period' || e.code === 'NumpadDecimal') { e.preventDefault();$('#dot').click();return; }
   if (/^Digit\d$/.test(e.code) || /^Numpad\d$/.test(e.code)) {
@@ -1633,6 +1648,16 @@ document.addEventListener('keydown', (e) => {
   else if (e.code === 'KeyV') { e.preventDefault();$('#voice').click(); }
   else if (e.code === 'Delete' || e.code === 'Backspace' || e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault();deleteSelected(); }
   else if (e.code === 'Escape') { score.selection.rangeEnd=null;render(); }
+});
+
+document.querySelectorAll('.tool-group').forEach((group)=>{
+  const label=group.querySelector('.group-label');
+  if(!label)return;
+  label.setAttribute('role','button');label.setAttribute('tabindex','0');
+  label.title=`${label.textContent.trim()} 메뉴 접기 또는 펼치기`;
+  const toggle=()=>{group.classList.toggle('collapsed');label.setAttribute('aria-expanded',String(!group.classList.contains('collapsed')));};
+  label.addEventListener('click',toggle);
+  label.addEventListener('keydown',(event)=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();toggle();}});
 });
 
 syncMetadataInputs(); updateControls(); render();

@@ -742,10 +742,10 @@ function render() {
         staffVoices.forEach((v)=>v.setStave(staff));if(lower)tabVoices.forEach((v)=>v.setStave(lower));
         formatter.format(allVoices,Math.max(30,staff.getNoteEndX()-start-8));
         // VexFlow may horizontally displace close notes, rests, or additional
-        // voices to avoid collisions. Engraving still requires every event at
-        // the same musical onset to share one rhythmic column. Build that
-        // column from the first sounding staff note, then force staff and TAB
-        // tickables (including rests) onto the same x coordinate.
+        // voices to avoid collisions. Derive every rhythmic column directly
+        // from its startTick instead of using one already-displaced voice as
+        // the anchor. This keeps a leading rest in any voice from pushing a
+        // simultaneous whole note (and keeps staff and TAB on the same x).
         const onsetGroups=new Map();
         measure.voices.forEach((voice,voiceIndex)=>voice.forEach((note)=>{
           if(note.grace)return;
@@ -754,10 +754,11 @@ function render() {
           if(!onsetGroups.has(key))onsetGroups.set(key,[]);
           onsetGroups.get(key).push({note,voiceIndex,staffNote:staffById.get(note.id),tabNote:tabById.get(note.id)});
         }));
-        onsetGroups.forEach((entries)=>{
-          const anchor=entries.find((entry)=>!entry.note.rest&&entry.staffNote)||entries.find((entry)=>entry.staffNote);
-          if(!anchor)return;
-          const targetX=anchor.staffNote.getAbsoluteX();
+        const columnStart=start+8;
+        const columnEnd=Math.min(staff.getNoteEndX(),lower?.getNoteEndX()??staff.getNoteEndX())-10;
+        const columnWidth=Math.max(1,columnEnd-columnStart);
+        onsetGroups.forEach((entries,onset)=>{
+          const targetX=columnStart+Math.max(0,Math.min(1,onset/measureLimit()))*columnWidth;
           entries.forEach(({staffNote,tabNote})=>{
             [staffNote,tabNote].forEach((tickable)=>{
               if(!tickable?.getAbsoluteX||!tickable?.setXShift)return;
@@ -1684,6 +1685,14 @@ document.querySelectorAll('.tool-group').forEach((group)=>{
   const toggle=()=>{group.classList.toggle('collapsed');label.setAttribute('aria-expanded',String(!group.classList.contains('collapsed')));};
   label.addEventListener('click',toggle);
   label.addEventListener('keydown',(event)=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();toggle();}});
+});
+
+// Native title bubbles are delayed, inconsistent between browsers, and are
+// commonly suppressed for SVG-only buttons. Mirror every toolbar title into
+// a CSS tooltip that appears immediately on mouse hover or keyboard focus.
+document.querySelectorAll('.toolbar [title]').forEach((control)=>{
+  control.dataset.tooltip=control.getAttribute('title');
+  control.setAttribute('aria-label',control.getAttribute('aria-label')||control.getAttribute('title'));
 });
 
 syncMetadataInputs(); updateControls(); render();

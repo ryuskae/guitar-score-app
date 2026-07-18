@@ -146,6 +146,16 @@ function noteAtTick(measure,voice,tick){
   return measure.voices[voice].find((note)=>{const match=position===tick;position+=durationTicks(note);return match;})||null;
 }
 
+function restCoveringTick(measure,voice,tick){
+  let sequentialTick=0;
+  return measure.voices[voice].find((note)=>{
+    const start=Number.isFinite(note.startTick)?note.startTick:sequentialTick;
+    const end=start+durationTicks(note);
+    sequentialTick=Math.max(sequentialTick,end);
+    return note.rest&&start<=tick+.001&&end>tick+.001;
+  })||null;
+}
+
 function measureLimit() { return timeSignatureTicks(score.timeSignature); }
 
 function restParts(totalTicks, startTick=0) {
@@ -173,10 +183,6 @@ function ensureEditableRests() {
   score.measures.forEach((measure,index)=>{
     for(let voice=0;voice<score.voiceCount;voice++)if(measure.voices[voice].length===0)measure.voices[voice].push(fullMeasureRest());
   });
-  if(!score.selection.noteId){
-    const voice=score.measures[score.selection.measure]?.voices[score.activeVoice];
-    if(voice?.length===1&&voice[0].measureRest)score.selection.noteId=voice[0].id;
-  }
 }
 
 function materializeVoiceTicks(measure, voiceIndex) {
@@ -735,15 +741,30 @@ function render() {
         const start=Math.max(staff.getNoteStartX(),lower?.getNoteStartX()??staff.getNoteStartX());
         staffVoices.forEach((v)=>v.setStave(staff));if(lower)tabVoices.forEach((v)=>v.setStave(lower));
         formatter.format(allVoices,Math.max(30,staff.getNoteEndX()-start-8));
-        // TAB voices already share an exact rhythmic grid. Reuse that grid on
-        // the staff so accidentals and VexFlow's collision avoidance cannot
-        // make simultaneous notes in different voices appear at different beats.
-        if(lower&&!piano)measure.voices.forEach((voice)=>voice.forEach((note)=>{
-          const staffNote=staffById.get(note.id),tabNote=tabById.get(note.id);
-          if(!staffNote||!tabNote||note.grace||note.rest)return;
-          const shift=(staffNote.getXShift?.()||0)+(tabNote.getAbsoluteX()-staffNote.getAbsoluteX());
-          staffNote.setXShift?.(shift);
+        // VexFlow may horizontally displace close notes, rests, or additional
+        // voices to avoid collisions. Engraving still requires every event at
+        // the same musical onset to share one rhythmic column. Build that
+        // column from the first sounding staff note, then force staff and TAB
+        // tickables (including rests) onto the same x coordinate.
+        const onsetGroups=new Map();
+        measure.voices.forEach((voice,voiceIndex)=>voice.forEach((note)=>{
+          if(note.grace)return;
+          const onset=Number.isFinite(note.startTick)?note.startTick:notePosition(note,measure,voiceIndex);
+          const key=Number(onset.toFixed(4));
+          if(!onsetGroups.has(key))onsetGroups.set(key,[]);
+          onsetGroups.get(key).push({note,voiceIndex,staffNote:staffById.get(note.id),tabNote:tabById.get(note.id)});
         }));
+        onsetGroups.forEach((entries)=>{
+          const anchor=entries.find((entry)=>!entry.note.rest&&entry.staffNote)||entries.find((entry)=>entry.staffNote);
+          if(!anchor)return;
+          const targetX=anchor.staffNote.getAbsoluteX();
+          entries.forEach(({staffNote,tabNote})=>{
+            [staffNote,tabNote].forEach((tickable)=>{
+              if(!tickable?.getAbsoluteX||!tickable?.setXShift)return;
+              tickable.setXShift((tickable.getXShift?.()||0)+targetX-tickable.getAbsoluteX());
+            });
+          });
+        });
         staffVoices.forEach((v)=>v.draw(context,staff));tabVoices.forEach((v)=>v.draw(context,lower));
         staffBeams.forEach((beam)=>beam.setContext(context).draw());tabBeams.forEach((beam)=>beam.setContext(context).draw());
         staffTuplets.forEach((tuplet)=>tuplet.setContext(context).draw());tabTuplets.forEach((tuplet)=>tuplet.setContext(context).draw());
@@ -866,7 +887,8 @@ function addNote(midi) {
   const inputDots=doubleDotted?2:(dotted?1:0);
   const newTicks=duration*dotMultiplier(inputDots);
   const selected=selectedEntry();
-  const caretRest=cursorInsert?noteAtTick(measure,score.activeVoice,targetTick):null;
+  if(cursorInsert)materializeVoiceTicks(measure,score.activeVoice);
+  const caretRest=cursorInsert?restCoveringTick(measure,score.activeVoice,targetTick):null;
   const replacing=selected||(caretRest?.rest?{note:caretRest,measure,measureIndex,voice:score.activeVoice}:null);
   if(graceMode&&replacing&&!replacing.note.grace){
     remember();
@@ -881,9 +903,13 @@ function addNote(midi) {
   if(replacing){
     remember();
     materializeVoiceTicks(replacing.measure,replacing.voice);
-    const start=replacing.note.startTick,oldTicks=durationTicks(replacing.note),delta=newTicks-oldTicks;
+    const replacingAtCaret=!selected&&replacing.note.rest&&cursorInsert;
+    const originalStart=replacing.note.startTick,originalEnd=originalStart+durationTicks(replacing.note);
+    const start=replacingAtCaret?targetTick:originalStart;
+    const oldTicks=replacingAtCaret?originalEnd-start:durationTicks(replacing.note),delta=newTicks-oldTicks;
+    if(replacingAtCaret&&start>originalStart+.001)replacing.measure.voices[replacing.voice].push(...restParts(start-originalStart,originalStart));
     const position=bestPosition(midi,replacing.measure,replacing.voice,start);
-    if(delta>0)replacing.measure.voices[replacing.voice].forEach((note)=>{if(note.id!==replacing.note.id&&note.startTick>start)note.startTick+=delta;});
+    if(delta>0)replacing.measure.voices[replacing.voice].forEach((note)=>{if(note.id!==replacing.note.id&&note.startTick>=originalEnd-.001)note.startTick+=delta;});
     Object.assign(replacing.note,{midi,diatonicMidi:naturalMidi,accidental:pendingAccidental===1?'sharp':pendingAccidental===-1?'flat':null,string:position.string,fret:position.fret,duration,dots:inputDots,dotted:inputDots>0,rest:restMode,grace:graceMode,startTick:start,ticks:newTicks,measureRest:false});
     delete replacing.note.pitches;delete replacing.note.positions;delete replacing.note.positionImported;delete replacing.note.tabImported;
     delete replacing.note.tuplet;

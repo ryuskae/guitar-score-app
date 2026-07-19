@@ -578,6 +578,29 @@ function drawAnnotations(layouts) {
   });
 }
 
+// Estimate how much horizontal room a measure needs before VexFlow performs
+// its detailed collision-aware formatting. Systems keep the requested number
+// of measures, but dense measures receive more of the available width than a
+// measure containing only one sustained note.
+function measureLayoutWeight(measure) {
+  const columns=new Map();
+  measure.voices.forEach((voice,voiceIndex)=>voice.forEach((note)=>{
+    const onset=Number.isFinite(note.startTick)?note.startTick:notePosition(note,measure,voiceIndex);
+    const key=Number(onset.toFixed(4));
+    const chordSize=Math.max(1,note.pitches?.length||1);
+    const accidentalCount=(note.accidentals||[]).filter(Boolean).length+(note.accidental?1:0);
+    const load=(note.grace?.42:1)+Math.max(0,chordSize-1)*.32+accidentalCount*.28+(note.dots||0)*.14;
+    const column=columns.get(key)||{primary:0,secondary:0};
+    if(note.grace)column.secondary+=load;
+    else if(load>column.primary){column.secondary+=column.primary*.25;column.primary=load;}
+    else column.secondary+=load*.25;
+    columns.set(key,column);
+  }));
+  const content=[...columns.values()].reduce((sum,column)=>sum+column.primary+column.secondary,0);
+  const barlineCost=(measure.repeatStart?1.1:0)+(measure.repeatEnd?1.1:0);
+  return Math.max(1.5,content+barlineCost);
+}
+
 function render() {
   ensureEditableRests();
   scoreSvg.replaceChildren();
@@ -614,13 +637,17 @@ function render() {
     // The first measure of every system also contains clef, key and time
     // signature. Giving every measure the same width made a rhythmically busy
     // first measure spill across the following barline.
-    const firstMeasureAllowance=Math.min(usable*.28,72*densityScale);
-    const regularMeasureWidth=Math.max(80,(usable-firstMeasureAllowance)/items.length);
+    const firstMeasureAllowance=Math.min(usable*.25,72*densityScale);
+    const minimumMeasureWidth=Math.min(105*densityScale,(usable-firstMeasureAllowance)/items.length*.72);
+    const distributable=Math.max(0,usable-firstMeasureAllowance-minimumMeasureWidth*items.length);
+    const layoutWeights=items.map(({measure})=>measureLayoutWeight(measure));
+    const totalWeight=layoutWeights.reduce((sum,value)=>sum+value,0)||1;
+    const measureWidths=layoutWeights.map((weight,index)=>minimumMeasureWidth+distributable*weight/totalWeight+(index===0?firstMeasureAllowance:0));
     let runningX=left;
     const piano = score.instrument === 'piano';
     let firstStaff=null,firstLower=null;
     items.forEach(({ measure, index }, localIndex) => {
-      const measureWidth=regularMeasureWidth+(localIndex===0?firstMeasureAllowance:0);
+      const measureWidth=measureWidths[localIndex];
       const x=runningX;runningX+=measureWidth;
       const staff=new VF.Stave(x,y,measureWidth);
       const lower=showLowerStaff?(piano?new VF.Stave(x,y+122*densityScale,measureWidth):new VF.TabStave(x,y+122*densityScale,measureWidth)):null;
@@ -743,12 +770,10 @@ function render() {
         if(tabVoices.length)formatter.joinVoices(tabVoices);
         const start=Math.max(staff.getNoteStartX(),lower?.getNoteStartX()??staff.getNoteStartX());
         staffVoices.forEach((v)=>v.setStave(staff));if(lower)tabVoices.forEach((v)=>v.setStave(lower));
-        formatter.format(allVoices,Math.max(30,staff.getNoteEndX()-start-8));
-        // VexFlow may horizontally displace close notes, rests, or additional
-        // voices to avoid collisions. Derive every rhythmic column directly
-        // from its startTick instead of using one already-displaced voice as
-        // the anchor. This keeps a leading rest in any voice from pushing a
-        // simultaneous whole note (and keeps staff and TAB on the same x).
+        formatter.format(allVoices,Math.max(30,Math.min(staff.getNoteEndX(),lower?.getNoteEndX()??staff.getNoteEndX())-start-14),{context,alignRests:true});
+        // Formatter owns rhythmic spacing. Only remove a visual x-offset that
+        // VexFlow may add between simultaneous staff voices; never overwrite
+        // the formatter's TickContext positions or proportional spacing.
         const onsetGroups=new Map();
         measure.voices.forEach((voice,voiceIndex)=>voice.forEach((note)=>{
           if(note.grace)return;
@@ -757,26 +782,21 @@ function render() {
           if(!onsetGroups.has(key))onsetGroups.set(key,[]);
           onsetGroups.get(key).push({note,voiceIndex,staffNote:staffById.get(note.id),tabNote:tabById.get(note.id)});
         }));
-        const columnStart=start+8;
-        const columnEnd=Math.min(staff.getNoteEndX(),lower?.getNoteEndX()??staff.getNoteEndX())-10;
-        const columnWidth=Math.max(1,columnEnd-columnStart);
         const visualTickableX=(tickable)=>{
           if(!tickable)return NaN;
           if(tickable instanceof VF.StaveNote&&tickable.getNoteHeadBeginX&&tickable.getNoteHeadEndX)return (tickable.getNoteHeadBeginX()+tickable.getNoteHeadEndX())/2;
           if(tickable instanceof VF.TabNote)return tickable.getAbsoluteX()+tickable.getGlyphWidth()/2;
           return tickable.getAbsoluteX?.()??0;
         };
-        onsetGroups.forEach((entries,onset)=>{
-          const targetX=columnStart+Math.max(0,Math.min(1,onset/measureLimit()))*columnWidth;
-          entries.forEach(({staffNote,tabNote})=>{
-            [staffNote,tabNote].forEach((tickable)=>{
-              if(!tickable?.getAbsoluteX)return;
-              const currentX=visualTickableX(tickable);
-              if(tickable instanceof VF.TabNote){
-                const tickContext=tickable.getTickContext?.();
-                tickContext?.setX?.(tickContext.getX()+targetX-currentX);
-              }else if(tickable.setXShift)tickable.setXShift((tickable.getXShift?.()||0)+targetX-currentX);
-            });
+        onsetGroups.forEach((entries)=>{
+          const sounding=entries.filter(({note})=>!note.rest);
+          if(sounding.length<2)return;
+          const tabAnchor=sounding.map(({tabNote})=>tabNote).find((note)=>note instanceof VF.TabNote);
+          const targetX=tabAnchor?visualTickableX(tabAnchor):visualTickableX(sounding[0].staffNote);
+          sounding.forEach(({staffNote})=>{
+            if(!staffNote?.setXShift)return;
+            const currentX=visualTickableX(staffNote);
+            staffNote.setXShift((staffNote.getXShift?.()||0)+targetX-currentX);
           });
         });
         staffVoices.forEach((v)=>v.draw(context,staff));tabVoices.forEach((v)=>v.draw(context,lower));

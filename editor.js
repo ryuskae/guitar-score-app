@@ -33,6 +33,7 @@ let measureWarning = null;
 let warningTimer = null;
 let selectedAnnotation = -1;
 let hairpinDrag = null;
+let lastTieShortcutAt = 0;
 
 // Keyboard letters enter the lower guitar octave by default: C3–B3.
 const PITCH_BY_CODE = { KeyA: 57, KeyB: 59, KeyC: 48, KeyD: 50, KeyE: 52, KeyF: 53, KeyG: 55 };
@@ -1139,7 +1140,11 @@ function addTiedContinuation() {
 function addAnnotation(type) {
   let range = orderedSelection();
   if (!range) { status.textContent = '먼저 음표를 선택하세요. Shift+클릭하면 범위를 선택할 수 있습니다.'; return; }
-  if(type==='tie'&&!score.selection.rangeEnd){addTiedContinuation();return;}
+  const rangeEnd=score.selection.rangeEnd;
+  const singleSelection=!rangeEnd||(
+    range.start.measure===rangeEnd.measure&&range.start.voice===rangeEnd.voice&&range.start.noteId===rangeEnd.noteId
+  );
+  if(type==='tie'&&singleSelection){addTiedContinuation();return;}
   if (type === 'slur' && !score.selection.rangeEnd) {
     const notes = allNotes(score, score.selection.voice);
     const index = notes.findIndex(({note}) => note.id === score.selection.noteId);
@@ -1785,11 +1790,31 @@ $('#pdf').addEventListener('click', exportPdf);
 $('#help').addEventListener('click', () => $('#helpDialog').showModal());
 $('#helpDialog button').addEventListener('click', () => $('#helpDialog').close());
 
+function isCommaShortcut(event){
+  return event.code==='Comma'||event.key===','||event.key==='，'||event.keyCode===188||event.which===188||event.charCode===44;
+}
+
+function handleTieShortcut(event){
+  if(!isCommaShortcut(event)||event.target?.matches?.('input,select,textarea')||$('#helpDialog').open)return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  // iPadOS can expose a punctuation key on keypress or keyup instead of
+  // keydown while a Korean IME is active. Listen to all three events but
+  // create only one tie for the physical key press.
+  const now=Date.now();
+  if(now-lastTieShortcutAt<350)return;
+  lastTieShortcutAt=now;
+  addAnnotation('tie');
+}
+
+window.addEventListener('keydown',handleTieShortcut,true);
+window.addEventListener('keypress',handleTieShortcut,true);
+window.addEventListener('keyup',handleTieShortcut,true);
+
 document.addEventListener('keydown', (e) => {
   if (e.target?.matches?.('input,select,textarea') || $('#helpDialog').open) return;
   if(e.code==='Equal'||e.key==='='){e.preventDefault();applyAccidental(1);return;}
   if(e.code==='Minus'||e.key==='-'){e.preventDefault();applyAccidental(-1);return;}
-  if(e.code==='Comma'||e.key===','){e.preventDefault();addAnnotation('tie');return;}
   if(e.code==='BracketLeft'||e.key==='['){e.preventDefault();toggleRepeat('repeatStart');return;}
   if(e.code==='BracketRight'||e.key===']'){e.preventDefault();toggleRepeat('repeatEnd');return;}
   if (PITCH_BY_CODE[e.code] != null) { e.preventDefault(); addNote(PITCH_BY_CODE[e.code]); return; }

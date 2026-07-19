@@ -1700,11 +1700,7 @@ $('#doubleDot').addEventListener('click', () => {
 });
 $('#sharp').addEventListener('click',()=>applyAccidental(1));
 $('#flat').addEventListener('click',()=>applyAccidental(-1));
-$('#rest').addEventListener('click', () => {
-  const entry=selectedEntry();
-  if(entry&&!entry.note.rest){addTiedContinuation();return;}
-  restMode=!restMode;updateControls();
-});
+$('#rest').addEventListener('click', () => {restMode=!restMode;updateControls();});
 $('#voice').addEventListener('click', () => {
   const entry=selectedEntry();
   const cursorTick=entry?notePosition(entry.note,entry.measure,entry.voice):(score.selection.cursorTick??0);
@@ -1793,6 +1789,7 @@ document.addEventListener('keydown', (e) => {
   if (e.target?.matches?.('input,select,textarea') || $('#helpDialog').open) return;
   if(e.code==='Equal'||e.key==='='){e.preventDefault();applyAccidental(1);return;}
   if(e.code==='Minus'||e.key==='-'){e.preventDefault();applyAccidental(-1);return;}
+  if(e.code==='Comma'||e.key===','){e.preventDefault();addAnnotation('tie');return;}
   if(e.code==='BracketLeft'||e.key==='['){e.preventDefault();toggleRepeat('repeatStart');return;}
   if(e.code==='BracketRight'||e.key===']'){e.preventDefault();toggleRepeat('repeatEnd');return;}
   if (PITCH_BY_CODE[e.code] != null) { e.preventDefault(); addNote(PITCH_BY_CODE[e.code]); return; }

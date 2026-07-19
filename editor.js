@@ -184,7 +184,7 @@ function fullMeasureRest() {
 function ensureEditableRests() {
   score.voiceCount=Math.max(1,Math.min(4,Number(score.voiceCount)||1));
   score.measures.forEach((measure,index)=>{
-    for(let voice=0;voice<score.voiceCount;voice++)if(measure.voices[voice].length===0)measure.voices[voice].push(fullMeasureRest());
+    for(let voice=0;voice<score.voiceCount;voice++)if(measure.voices[voice].length===0&&!measure.deletedVoices?.includes(voice))measure.voices[voice].push(fullMeasureRest());
   });
 }
 
@@ -762,16 +762,20 @@ function render() {
         const columnWidth=Math.max(1,columnEnd-columnStart);
         const visualTickableX=(tickable)=>{
           if(!tickable)return NaN;
-          if(tickable.getNoteHeadBeginX&&tickable.getNoteHeadEndX)return (tickable.getNoteHeadBeginX()+tickable.getNoteHeadEndX())/2;
-          return (tickable.getAbsoluteX?.()??0)+(tickable.getXShift?.()??0);
+          if(tickable instanceof VF.StaveNote&&tickable.getNoteHeadBeginX&&tickable.getNoteHeadEndX)return (tickable.getNoteHeadBeginX()+tickable.getNoteHeadEndX())/2;
+          if(tickable instanceof VF.TabNote)return tickable.getAbsoluteX()+tickable.getGlyphWidth()/2;
+          return tickable.getAbsoluteX?.()??0;
         };
         onsetGroups.forEach((entries,onset)=>{
           const targetX=columnStart+Math.max(0,Math.min(1,onset/measureLimit()))*columnWidth;
           entries.forEach(({staffNote,tabNote})=>{
             [staffNote,tabNote].forEach((tickable)=>{
-              if(!tickable?.getAbsoluteX||!tickable?.setXShift)return;
+              if(!tickable?.getAbsoluteX)return;
               const currentX=visualTickableX(tickable);
-              tickable.setXShift((tickable.getXShift?.()||0)+targetX-currentX);
+              if(tickable instanceof VF.TabNote){
+                const tickContext=tickable.getTickContext?.();
+                tickContext?.setX?.(tickContext.getX()+targetX-currentX);
+              }else if(tickable.setXShift)tickable.setXShift((tickable.getXShift?.()||0)+targetX-currentX);
             });
           });
         });
@@ -937,6 +941,7 @@ function addNote(midi) {
     showMeasureWarning(measureIndex);return;
   }
   remember();
+  if(measure.deletedVoices?.includes(score.activeVoice))measure.deletedVoices=measure.deletedVoices.filter((voice)=>voice!==score.activeVoice);
   if (measureTicks(measure, score.activeVoice) + newTicks > measureLimit()) {
     measureIndex++;
     if (!score.measures[measureIndex]) score.measures.push(createMeasure());
@@ -1608,6 +1613,38 @@ $('#addVoice').addEventListener('click',()=>{
   score.selection={measure:score.selection.measure,voice:current,noteId:null,source:'staff',cursorTick:0,rangeEnd:null};
   render();
 });
+
+function deleteActiveVoice(currentMeasureOnly=false){
+  const voice=score.activeVoice;
+  if(!currentMeasureOnly&&(score.voiceCount||1)<=1){status.textContent='마지막 성부는 삭제할 수 없습니다.';return;}
+  const message=currentMeasureOnly
+    ? `${score.selection.measure+1}마디의 V${voice+1} 음표와 쉼표를 모두 삭제할까요?`
+    : `V${voice+1} 성부의 모든 음표와 쉼표가 악보 전체에서 사라집니다. 정말 계속할까요?`;
+  if(!window.confirm(message))return;
+  remember();
+  if(currentMeasureOnly){
+    const measure=score.measures[score.selection.measure];
+    const removed=new Set((measure.voices[voice]||[]).map((note)=>note.id));
+    measure.voices[voice]=[];
+    measure.deletedVoices=[...new Set([...(measure.deletedVoices||[]),voice])];
+    score.annotations=score.annotations.filter((annotation)=>!removed.has(annotation.start?.noteId)&&!removed.has(annotation.end?.noteId));
+  }else{
+    const removed=new Set(score.measures.flatMap((measure)=>(measure.voices[voice]||[]).map((note)=>note.id)));
+    score.measures.forEach((measure)=>{
+      measure.voices.splice(voice,1);measure.voices.push([]);
+      measure.deletedVoices=(measure.deletedVoices||[]).filter((item)=>item!==voice).map((item)=>item>voice?item-1:item);
+    });
+    score.annotations=score.annotations.filter((annotation)=>!removed.has(annotation.start?.noteId)&&!removed.has(annotation.end?.noteId));
+    score.annotations.forEach((annotation)=>['start','end'].forEach((side)=>{if(annotation[side]?.voice>voice)annotation[side].voice--;}));
+    score.voiceCount--;
+    score.activeVoice=Math.min(voice,score.voiceCount-1);
+  }
+  score.selection={measure:score.selection.measure,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:0,rangeEnd:null};
+  updateControls();render();scoreSvg.focus?.({preventScroll:true});
+}
+
+$('#deleteVoice').addEventListener('click',()=>deleteActiveVoice(false));
+$('#deleteMeasureVoice').addEventListener('click',()=>deleteActiveVoice(true));
 $('#grace').addEventListener('click', () => {graceMode=!graceMode;updateControls();render();});
 $('#tie').addEventListener('click', () => addAnnotation('tie'));
 $('#slur').addEventListener('click', () => addAnnotation('slur'));

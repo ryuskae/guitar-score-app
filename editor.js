@@ -62,7 +62,10 @@ function selectedEntry() {
 }
 
 function setSelection(measure, voice, noteId = null, extend = false, source = 'staff') {
-  document.activeElement?.blur?.();
+  // Keep a real focus target for iPadOS hardware keyboards. The old blur()
+  // ran after pointerdown had focused the score, leaving Safari with no
+  // active element and therefore no reliable arrow-key events.
+  scoreSvg.focus?.({preventScroll:true});
   if (extend && score.selection.noteId) {
     score.selection.rangeEnd = { measure, voice, noteId };
   } else {
@@ -757,12 +760,18 @@ function render() {
         const columnStart=start+8;
         const columnEnd=Math.min(staff.getNoteEndX(),lower?.getNoteEndX()??staff.getNoteEndX())-10;
         const columnWidth=Math.max(1,columnEnd-columnStart);
+        const visualTickableX=(tickable)=>{
+          if(!tickable)return NaN;
+          if(tickable.getNoteHeadBeginX&&tickable.getNoteHeadEndX)return (tickable.getNoteHeadBeginX()+tickable.getNoteHeadEndX())/2;
+          return (tickable.getAbsoluteX?.()??0)+(tickable.getXShift?.()??0);
+        };
         onsetGroups.forEach((entries,onset)=>{
           const targetX=columnStart+Math.max(0,Math.min(1,onset/measureLimit()))*columnWidth;
           entries.forEach(({staffNote,tabNote})=>{
             [staffNote,tabNote].forEach((tickable)=>{
               if(!tickable?.getAbsoluteX||!tickable?.setXShift)return;
-              tickable.setXShift((tickable.getXShift?.()||0)+targetX-tickable.getAbsoluteX());
+              const currentX=visualTickableX(tickable);
+              tickable.setXShift((tickable.getXShift?.()||0)+targetX-currentX);
             });
           });
         });
@@ -772,8 +781,8 @@ function render() {
         measure.voices.forEach((voice,voiceIndex)=>voice.forEach((note)=>{
           const sn=staffById.get(note.id),tn=tabById.get(note.id);
           if(!sn)return;
-          const noteX=sn.getAbsoluteX(),noteY=sn.getYs?.()[0]??staffTop+20;
-          const tabX=tn?.getAbsoluteX?.()??noteX,tabNoteY=tn?.getYs?.()[0]??lowerTop;
+          const noteX=visualTickableX(sn),noteY=sn.getYs?.()[0]??staffTop+20;
+          const tabX=tn?visualTickableX(tn):noteX,tabNoteY=tn?.getYs?.()[0]??lowerTop;
           const stem=sn.getStemExtents?.();
           const topY=Math.min(noteY,stem?.topY??noteY,stem?.baseY??noteY);
           const bottomY=Math.max(noteY,stem?.topY??noteY,stem?.baseY??noteY);
@@ -781,7 +790,7 @@ function render() {
           if(note.dynamic)svg('text',{x:noteX-5,y:bottomY+23*densityScale,text:note.dynamic,class:'dynamic-mark','font-size':15*densityScale,'font-family':'serif','font-style':'italic','font-weight':'bold'});
         }));
       }
-      if(localIndex===0)svg('text',{x:x+3,y:staffTop-12,text:String(index+1),class:'measure-number','font-size':11,'font-family':'Arial, sans-serif','font-weight':'700',fill:'#4b5870'});
+      if(localIndex===0)svg('text',{x:x+20,y:staffTop-18,text:String(index+1),class:'measure-number','font-size':15,'font-family':'Arial, sans-serif','font-weight':'700',fill:'#334155'});
       if(measureWarning?.measureIndex===index){
         const warningWidth=Math.min(measureWidth-12,210),warningX=x+(measureWidth-warningWidth)/2;
         svg('rect',{x:warningX,y:staffTop-37,width:warningWidth,height:21,rx:5,class:'measure-warning-bg'});

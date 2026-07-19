@@ -218,6 +218,76 @@ function normalizeVoiceToMeasure(measure, voiceIndex) {
   measure.voices[voiceIndex]=kept;
 }
 
+function removeAnnotationsForNotes(noteIds) {
+  if(!noteIds.size)return;
+  score.annotations=score.annotations.filter((annotation)=>
+    !noteIds.has(annotation.start?.noteId)&&!noteIds.has(annotation.end?.noteId));
+}
+
+// Rebuild rests around fixed musical events. Editing a duration therefore
+// overwrites its time range instead of pushing later notes to the right.
+function rebuildVoiceRests(measure, voiceIndex) {
+  const limit=measureLimit();
+  const events=measure.voices[voiceIndex]
+    .filter((note)=>!note.rest)
+    .sort((a,b)=>(a.startTick??0)-(b.startTick??0)||(a.grace?-1:1));
+  const rebuilt=[];
+  let cursor=0;
+  events.forEach((note)=>{
+    const start=Math.max(0,Number(note.startTick)||0);
+    if(!note.grace&&start>cursor+.001)rebuilt.push(...restParts(start-cursor,cursor));
+    rebuilt.push(note);
+    if(!note.grace)cursor=Math.max(cursor,Math.min(limit,start+durationTicks(note)));
+  });
+  if(cursor<limit-.001)rebuilt.push(...restParts(limit-cursor,cursor));
+  measure.voices[voiceIndex]=rebuilt.sort((a,b)=>(a.startTick??0)-(b.startTick??0)||(a.grace?-1:1));
+}
+
+function overwriteFollowingEvents(measure, voiceIndex, keepNote, oldEnd, newEnd) {
+  if(newEnd<=oldEnd+.001){rebuildVoiceRests(measure,voiceIndex);return;}
+  const removed=new Set();
+  measure.voices[voiceIndex]=measure.voices[voiceIndex].filter((note)=>{
+    if(note===keepNote||note.rest||note.grace)return true;
+    const start=Number(note.startTick)||0,end=start+durationTicks(note);
+    const overlaps=start<newEnd-.001&&end>oldEnd+.001;
+    if(overlaps)removed.add(note.id);
+    return !overlaps;
+  });
+  removeAnnotationsForNotes(removed);
+  rebuildVoiceRests(measure,voiceIndex);
+}
+
+function changeSelectedDuration(newDuration) {
+  const entry=selectedEntry();
+  duration=newDuration;
+  if(!entry){updateControls();return;}
+  materializeVoiceTicks(entry.measure,entry.voice);
+  const start=notePosition(entry.note,entry.measure,entry.voice);
+  const oldEnd=start+durationTicks(entry.note),newEnd=start+newDuration;
+  if(newEnd>measureLimit()+.001){showMeasureWarning(entry.measureIndex);updateControls();return;}
+  remember();
+  Object.assign(entry.note,{duration:newDuration,dots:0,dotted:false,ticks:newDuration,measureRest:entry.note.rest&&start===0&&Math.abs(newDuration-measureLimit())<.001});
+  delete entry.note.tuplet;
+  overwriteFollowingEvents(entry.measure,entry.voice,entry.note,oldEnd,newEnd);
+  dotted=false;doubleDotted=false;
+  updateControls();render();
+}
+
+function changeSelectedDots(nextDots) {
+  const entry=selectedEntry();
+  if(!entry)return false;
+  materializeVoiceTicks(entry.measure,entry.voice);
+  const start=notePosition(entry.note,entry.measure,entry.voice);
+  const oldEnd=start+durationTicks(entry.note);
+  const newTicks=entry.note.duration*dotMultiplier(nextDots),newEnd=start+newTicks;
+  if(newEnd>measureLimit()+.001){showMeasureWarning(entry.measureIndex);return true;}
+  remember();
+  Object.assign(entry.note,{dots:nextDots,dotted:nextDots>0,ticks:newTicks,measureRest:false});
+  overwriteFollowingEvents(entry.measure,entry.voice,entry.note,oldEnd,newEnd);
+  dotted=nextDots===1;doubleDotted=nextDots===2;
+  updateControls();render();return true;
+}
+
 function showMeasureWarning(measureIndex, message='마디의 박자 길이를 초과할 수 없습니다.') {
   measureWarning={measureIndex,message};
   clearTimeout(warningTimer);
@@ -226,12 +296,6 @@ function showMeasureWarning(measureIndex, message='마디의 박자 길이를 �
 }
 
 function dotMultiplier(count=0) { let value=1,part=.5;for(let i=0;i<count;i++){value+=part;part/=2;}return value; }
-
-function noteFitsMeasure(measure, voice, note, dotsValue=Number.isFinite(note.dots)?note.dots:(note.dotted?1:0), durationValue=note.duration) {
-  const used=measure.voices[voice].reduce((sum,item)=>sum+(item.id===note.id?0:durationTicks(item)),0);
-  const proposed=note.grace?0:durationValue*dotMultiplier(dotsValue);
-  return used+proposed<=measureLimit();
-}
 
 function systems() {
   const groups = [];
@@ -935,20 +999,18 @@ function addNote(midi) {
     pendingAccidental=0;dotted=false;doubleDotted=false;score.selection.source='staff';score.selection.rangeEnd=null;updateControls();render();return;
   }
   if(replacing){
-    remember();
     materializeVoiceTicks(replacing.measure,replacing.voice);
     const replacingAtCaret=!selected&&replacing.note.rest&&cursorInsert;
     const originalStart=replacing.note.startTick,originalEnd=originalStart+durationTicks(replacing.note);
     const start=replacingAtCaret?targetTick:originalStart;
-    const oldTicks=replacingAtCaret?originalEnd-start:durationTicks(replacing.note),delta=newTicks-oldTicks;
-    if(replacingAtCaret&&start>originalStart+.001)replacing.measure.voices[replacing.voice].push(...restParts(start-originalStart,originalStart));
+    const newEnd=start+newTicks;
+    if(newEnd>measureLimit()+.001){showMeasureWarning(replacing.measureIndex);return;}
+    remember();
     const position=bestPosition(midi,replacing.measure,replacing.voice,start);
-    if(delta>0)replacing.measure.voices[replacing.voice].forEach((note)=>{if(note.id!==replacing.note.id&&note.startTick>=originalEnd-.001)note.startTick+=delta;});
     Object.assign(replacing.note,{midi,diatonicMidi:naturalMidi,accidental:pendingAccidental===1?'sharp':pendingAccidental===-1?'flat':null,string:position.string,fret:position.fret,duration,dots:inputDots,dotted:inputDots>0,rest:restMode,grace:graceMode,startTick:start,ticks:newTicks,measureRest:false});
     delete replacing.note.pitches;delete replacing.note.positions;delete replacing.note.positionImported;delete replacing.note.tabImported;
     delete replacing.note.tuplet;
-    if(delta<0)replacing.measure.voices[replacing.voice].push(...restParts(-delta,start+newTicks));
-    normalizeVoiceToMeasure(replacing.measure,replacing.voice);
+    overwriteFollowingEvents(replacing.measure,replacing.voice,replacing.note,replacingAtCaret?start:originalEnd,newEnd);
     let nextMeasure=replacing.measureIndex,nextTick=start+newTicks;
     if(nextTick>=measureLimit()){
       nextMeasure=replacing.measureIndex+1;nextTick=0;
@@ -1033,31 +1095,55 @@ function toggleBeam() {
   remember();entries.forEach(({note},index)=>{if(remove)delete note.beams;else note.beams=[{number:1,value:index===0?'begin':index===entries.length-1?'end':'continue'},...(note.duration<=2?[{number:2,value:index===0?'begin':index===entries.length-1?'end':'continue'}]:[])];});render();
 }
 
+function addTiedContinuation() {
+  const entry=selectedEntry();
+  if(!entry||entry.note.rest){status.textContent='타이로 연장할 음표를 먼저 선택하세요.';return;}
+  materializeVoiceTicks(entry.measure,entry.voice);
+  let targetMeasureIndex=entry.measureIndex;
+  let targetTick=notePosition(entry.note,entry.measure,entry.voice)+durationTicks(entry.note);
+  if(targetTick>=measureLimit()-.001){
+    targetMeasureIndex++;
+    targetTick=0;
+  }
+  let targetMeasure=score.measures[targetMeasureIndex];
+  if(targetMeasure)materializeVoiceTicks(targetMeasure,entry.voice);
+  const existing=targetMeasure?.voices[entry.voice].find((note)=>
+    !note.grace&&Math.abs((Number(note.startTick)||0)-targetTick)<.001);
+  const samePitch=existing&&!existing.rest&&(
+    existing.midi===entry.note.midi||existing.pitches?.includes(entry.note.midi));
+  if(samePitch){
+    remember();
+    score.annotations.push({type:'tie',start:{measure:entry.measureIndex,voice:entry.voice,noteId:entry.note.id},end:{measure:targetMeasureIndex,voice:entry.voice,noteId:existing.id}});
+    render();return;
+  }
+  const available=measureLimit()-targetTick;
+  const continuationTicks=Math.min(durationTicks(entry.note),available);
+  if(continuationTicks<1-.001){status.textContent='타이를 입력할 박이 없습니다.';return;}
+  remember();
+  if(!targetMeasure){score.measures.push(createMeasure());targetMeasure=score.measures[targetMeasureIndex];}
+  const continuation=noteFromStringFret(entry.note.string,entry.note.fret,entry.note.duration,false,false);
+  Object.assign(continuation,{
+    midi:entry.note.midi,diatonicMidi:entry.note.diatonicMidi,accidental:entry.note.accidental,
+    string:entry.note.string,fret:entry.note.fret,startTick:targetTick,ticks:continuationTicks,
+    dots:0,dotted:false,rest:false,grace:false,
+  });
+  if(entry.note.pitches)continuation.pitches=[...entry.note.pitches];
+  if(entry.note.positions)continuation.positions=entry.note.positions.map((position)=>({...position}));
+  setNoteTicks(continuation,continuationTicks);
+  targetMeasure.voices[entry.voice].push(continuation);
+  overwriteFollowingEvents(targetMeasure,entry.voice,continuation,targetTick,targetTick+continuationTicks);
+  score.annotations.push({type:'tie',start:{measure:entry.measureIndex,voice:entry.voice,noteId:entry.note.id},end:{measure:targetMeasureIndex,voice:entry.voice,noteId:continuation.id}});
+  render();
+}
+
 function addAnnotation(type) {
   let range = orderedSelection();
   if (!range) { status.textContent = '먼저 음표를 선택하세요. Shift+클릭하면 범위를 선택할 수 있습니다.'; return; }
-  if ((type === 'slur' || type === 'tie') && !score.selection.rangeEnd) {
+  if(type==='tie'&&!score.selection.rangeEnd){addTiedContinuation();return;}
+  if (type === 'slur' && !score.selection.rangeEnd) {
     const notes = allNotes(score, score.selection.voice);
     const index = notes.findIndex(({note}) => note.id === score.selection.noteId);
     let next = notes[index + 1];
-    if (!next && type === 'tie') {
-      const entry=selectedEntry();
-      if(!entry||entry.note.rest)return;
-      remember();
-      let targetIndex=entry.measureIndex,targetMeasure=entry.measure;
-      if(measureTicks(targetMeasure,entry.voice)+durationTicks(entry.note)>measureLimit()){
-        targetIndex++;
-        if(!score.measures[targetIndex])score.measures.push(createMeasure());
-        targetMeasure=score.measures[targetIndex];
-      }
-      const duplicate=noteFromStringFret(entry.note.string,entry.note.fret,entry.note.duration,entry.note.dotted,false);
-      duplicate.midi=entry.note.midi;
-      duplicate.dots=entry.note.dots??(entry.note.dotted?1:0);
-      targetMeasure.voices[entry.voice].push(duplicate);
-      next={note:duplicate,measure:targetMeasure,measureIndex:targetIndex,voice:entry.voice};
-      range={start:range.start,end:{measure:targetIndex,voice:entry.voice,noteId:duplicate.id}};
-      score.annotations.push({type,...range});render();return;
-    }
     if (!next) { status.textContent = '슬러를 연결할 다음 음표가 없습니다.'; return; }
     range = { start:range.start, end:{ measure:next.measureIndex, voice:next.voice, noteId:next.note.id } };
   }
@@ -1594,16 +1680,12 @@ function syncMetadataInputs() {
   $('#tempo').value = String(score.tempo||120);
 }
 
-document.querySelectorAll('[data-duration]').forEach((button) => button.addEventListener('click', () => { duration = Number(button.dataset.duration); updateControls(); }));
+document.querySelectorAll('[data-duration]').forEach((button) => button.addEventListener('click', () => changeSelectedDuration(Number(button.dataset.duration))));
 $('#dot').addEventListener('click', () => {
   const entry=selectedEntry();
   if(entry){
     const current=entry.note.dots??(entry.note.dotted?1:0),nextDots=current===1?0:1;
-    if(!noteFitsMeasure(entry.measure,entry.voice,entry.note,nextDots)){
-      showMeasureWarning(entry.measureIndex);
-      return;
-    }
-    remember();entry.note.dots=nextDots;entry.note.dotted=nextDots>0;delete entry.note.ticks;dotted=nextDots===1;doubleDotted=false;
+    changeSelectedDots(nextDots);return;
   }
   else {dotted=!dotted;if(dotted)doubleDotted=false;}
   updateControls();render();
@@ -1612,14 +1694,17 @@ $('#doubleDot').addEventListener('click', () => {
   const entry=selectedEntry();
   if(entry){
     const current=entry.note.dots??(entry.note.dotted?1:0),nextDots=current===2?0:2;
-    if(!noteFitsMeasure(entry.measure,entry.voice,entry.note,nextDots)){showMeasureWarning(entry.measureIndex);return;}
-    remember();entry.note.dots=nextDots;entry.note.dotted=nextDots>0;delete entry.note.ticks;doubleDotted=nextDots===2;dotted=false;
+    changeSelectedDots(nextDots);return;
   }else{doubleDotted=!doubleDotted;if(doubleDotted)dotted=false;}
   updateControls();render();
 });
 $('#sharp').addEventListener('click',()=>applyAccidental(1));
 $('#flat').addEventListener('click',()=>applyAccidental(-1));
-$('#rest').addEventListener('click', () => { restMode=!restMode; updateControls(); });
+$('#rest').addEventListener('click', () => {
+  const entry=selectedEntry();
+  if(entry&&!entry.note.rest){addTiedContinuation();return;}
+  restMode=!restMode;updateControls();
+});
 $('#voice').addEventListener('click', () => {
   const entry=selectedEntry();
   const cursorTick=entry?notePosition(entry.note,entry.measure,entry.voice):(score.selection.cursorTick??0);
@@ -1718,7 +1803,7 @@ document.addEventListener('keydown', (e) => {
       e.preventDefault();changeFret(digit);return;
     }
     const durationByDigit={1:32,2:16,3:8,4:4,5:2};
-    if(durationByDigit[digit]){e.preventDefault();duration=durationByDigit[digit];updateControls();return;}
+    if(durationByDigit[digit]){e.preventDefault();changeSelectedDuration(durationByDigit[digit]);return;}
   }
   if(e.code==='Tab'){e.preventDefault();insertMeasureAfterSelection();return;}
   if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {

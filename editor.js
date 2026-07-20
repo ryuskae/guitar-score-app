@@ -344,7 +344,9 @@ function drawNote(note, measure, measureIndex, voice, x, staffY, tabY, group, be
     svg('text', { x, y:staffY+28, class:'rest', text: note.grace ? '𝄽' : '𝄾' }, g);
   } else {
     drawLedgerLines(x, y, staffY, g);
-    if (SHARP_PITCH_CLASSES.has(((writtenMidi(note.midi)%12)+12)%12)) svg('text', { x:x-14, y:y+4, text:'♯', 'font-size':14, 'font-family':'serif' }, g);
+    const accidentalSymbol={sharp:'♯',flat:'♭',natural:'♮'}[note.accidental]
+      ||(SHARP_PITCH_CLASSES.has(((writtenMidi(note.midi)%12)+12)%12)?'♯':null);
+    if(accidentalSymbol)svg('text', { x:x-14, y:y+4, text:accidentalSymbol, 'font-size':14, 'font-family':'serif' }, g);
     const scale = note.grace ? .7 : 1;
     const stemUp = voice % 2 === 0;
     const stemX = x + (stemUp ? 5 : -5) * scale;
@@ -494,6 +496,11 @@ function endpointFor(ref) {
 const VEX_DURATION = { 32:'w', 16:'h', 8:'q', 4:'8', 2:'16', 1:'32' };
 const VEX_NAMES = ['c','c#','d','d#','e','f','f#','g','g#','a','a#','b'];
 const KEY_BY_FIFTHS = ['Cb','Gb','Db','Ab','Eb','Bb','F','C','G','D','A','E','B','F#','C#'];
+const NATURAL_NAME_BY_PC = {0:'c',2:'d',4:'e',5:'f',7:'g',9:'a',11:'b'};
+const SHARP_ORDER = [5,0,7,2,9,4,11];
+const FLAT_ORDER = [11,4,9,2,7,0,5];
+const ACCIDENTAL_ALTER = {sharp:1,flat:-1,natural:0,'double-sharp':2,'flat-flat':-2};
+const ALTER_ACCIDENTAL = {0:'natural',1:'sharp','-1':'flat',2:'double-sharp','-2':'flat-flat'};
 
 function vexDuration(note, rest=false) {
   if(rest&&note.measureRest)return 'wr';
@@ -520,6 +527,57 @@ function spacerNotes(ticks) {
 function vexKey(midi) {
   const value=writtenMidi(midi), pc=((value%12)+12)%12, octave=Math.floor(value/12)-1;
   return `${VEX_NAMES[pc]}/${octave}`;
+}
+
+function naturalMidiForKey(note,keyIndex,midi,explicitAccidental){
+  const stored=note.diatonicMidis?.[keyIndex]??(keyIndex===0?note.diatonicMidi:null);
+  if(Number.isFinite(stored))return stored;
+  const explicitAlter=ACCIDENTAL_ALTER[explicitAccidental];
+  if(Number.isFinite(explicitAlter))return midi-explicitAlter;
+  return SHARP_PITCH_CLASSES.has(((midi%12)+12)%12)?midi-1:midi;
+}
+
+function vexKeyForNote(note,keyIndex,midi){
+  const explicit=note.accidentals?.[keyIndex]??(keyIndex===0?note.accidental:null);
+  const natural=naturalMidiForKey(note,keyIndex,midi,explicit);
+  const written=writtenMidi(natural),pc=((written%12)+12)%12,octave=Math.floor(written/12)-1;
+  const name=NATURAL_NAME_BY_PC[pc];
+  return name?`${name}/${octave}`:vexKey(midi);
+}
+
+function keySignatureAlter(naturalMidi,fifths){
+  const pitchClass=((naturalMidi%12)+12)%12;
+  if(fifths>0&&SHARP_ORDER.slice(0,Math.min(7,fifths)).includes(pitchClass))return 1;
+  if(fifths<0&&FLAT_ORDER.slice(0,Math.min(7,-fifths)).includes(pitchClass))return -1;
+  return 0;
+}
+
+function displayedAccidentalsForMeasure(measure,fifths){
+  const result=new Map(),state=new Map(),events=[];
+  measure.voices.forEach((voice,voiceIndex)=>{
+    let tick=0;
+    voice.forEach((note,index)=>{
+      const start=Number.isFinite(note.startTick)?note.startTick:tick;
+      events.push({note,voiceIndex,index,start});
+      if(!note.grace)tick=Math.max(tick,start+durationTicks(note));
+    });
+  });
+  events.sort((a,b)=>a.start-b.start||Number(b.note.grace)-Number(a.note.grace)||a.voiceIndex-b.voiceIndex||a.index-b.index);
+  events.forEach(({note})=>{
+    if(note.rest)return;
+    const midis=note.pitches?.length?note.pitches:[note.midi];
+    midis.forEach((midi,keyIndex)=>{
+      const explicit=note.accidentals?.[keyIndex]??(keyIndex===0?note.accidental:null);
+      const natural=naturalMidiForKey(note,keyIndex,midi,explicit);
+      const actualAlter=Math.max(-2,Math.min(2,Math.round(midi-natural)));
+      const stateKey=String(natural);
+      const previous=state.has(stateKey)?state.get(stateKey):keySignatureAlter(natural,fifths);
+      const accidental=explicit||(actualAlter!==previous?ALTER_ACCIDENTAL[actualAlter]:null);
+      if(accidental)result.set(`${note.id}:${keyIndex}`,accidental);
+      state.set(stateKey,actualAlter);
+    });
+  });
+  return result;
 }
 
 function selectionOrder() {
@@ -736,6 +794,7 @@ function render() {
       const lowerTop=lower?.getYForLine(0)??staffTop,lowerBottom=lower?.getYForLine(piano?4:5)??staffBottom;
       layouts.set(index,{x,width:measureWidth,staffY:staffTop,tabY:lowerTop,lowerBottom,noteStart:staff.getNoteStartX(),noteEnd:staff.getNoteEndX(),system:systemIndex});
       const staffVoices=[],tabVoices=[],staffById=new Map(),tabById=new Map(),staffBeams=[],tabBeams=[],staffTuplets=[],tabTuplets=[];
+      const displayedAccidentals=displayedAccidentalsForMeasure(measure,currentKeyFifths);
       measure.voices.forEach((modelVoice,voiceIndex)=>{
         if(!modelVoice.length)return;
         const active=voiceIndex===score.activeVoice;
@@ -751,15 +810,15 @@ function render() {
             staffNotes.push(...staffSpacers);tabNotes.push(...tabSpacers);renderTick=startTick;
           }
           const chordMidis=note.pitches?.length?note.pitches:[note.midi];
-          const chordKeys=chordMidis.map(vexKey);
+          const chordKeys=chordMidis.map((midi,keyIndex)=>vexKeyForNote(note,keyIndex,midi));
           const chordPositions=note.positions?.length?note.positions.map(({string,fret})=>({str:string,fret})):[{str:note.string,fret:note.fret}];
           const noteColor=active&&selected.has(note.id)?'#d97706':voiceColor;
           if(note.grace){
             const graceStaff=new VF.GraceNote({keys:chordKeys,duration:'16',slash:!!note.graceSlash,stem_direction:direction});
             const graceTab=lower?new VF.GraceTabNote({positions:chordPositions,duration:'16',stem_direction:direction}):null;
             chordKeys.forEach((key,keyIndex)=>{
-              const importedAccidental=note.accidentals?.[keyIndex]??(keyIndex===0?note.accidental:null);
-              const symbol={sharp:'#',flat:'b',natural:'n','double-sharp':'##','flat-flat':'bb'}[importedAccidental];
+              const displayedAccidental=displayedAccidentals.get(`${note.id}:${keyIndex}`);
+              const symbol={sharp:'#',flat:'b',natural:'n','double-sharp':'##','flat-flat':'bb'}[displayedAccidental];
               if(symbol)graceStaff.addModifier(new VF.Accidental(symbol),keyIndex);
             });
             graceStaff.setStyle({fillStyle:noteColor,strokeStyle:noteColor});graceTab?.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
@@ -770,9 +829,9 @@ function render() {
           let staveNote;
           staveNote=new VF.StaveNote({keys:chordKeys,duration:vexDuration(note,note.rest),stem_direction:direction});
           if(!note.rest)chordKeys.forEach((key,keyIndex)=>{
-            const importedAccidental=note.accidentals?.[keyIndex]??(keyIndex===0?note.accidental:null);
+            const displayedAccidental=displayedAccidentals.get(`${note.id}:${keyIndex}`);
             const accidentalMap={sharp:'#',flat:'b',natural:'n','double-sharp':'##','flat-flat':'bb'};
-            const symbol=accidentalMap[importedAccidental]||(!score.importedXml&&key.includes('#')?'#':null);
+            const symbol=accidentalMap[displayedAccidental];
             if(symbol)staveNote.addModifier(new VF.Accidental(symbol),keyIndex);
           });
           const dotCount=Number.isFinite(note.dots)?note.dots:(note.dotted?1:0);
@@ -1243,6 +1302,7 @@ function changeFret(digit) {
 function applyAccidental(value) {
   const entry=selectedEntry();
   if(!entry||entry.note.rest){
+    if(value===0){status.textContent='제자리표를 적용할 오선 음표를 먼저 선택하세요.';return;}
     pendingAccidental=pendingAccidental===value?0:value;
     updateControls();return;
   }
@@ -1250,7 +1310,12 @@ function applyAccidental(value) {
   const oldDelta=entry.note.accidental==='sharp'?1:entry.note.accidental==='flat'?-1:0;
   const natural=Number.isFinite(entry.note.diatonicMidi)?entry.note.diatonicMidi:entry.note.midi-oldDelta;
   const midi=natural+value,position=bestPosition(midi,entry.measure,entry.voice,notePosition(entry.note,entry.measure,entry.voice));
-  Object.assign(entry.note,{midi,diatonicMidi:natural,accidental:value===1?'sharp':'flat',string:position.string,fret:position.fret});
+  const accidental=value===1?'sharp':value===-1?'flat':'natural';
+  Object.assign(entry.note,{midi,diatonicMidi:natural,accidental,string:position.string,fret:position.fret});
+  if(Array.isArray(entry.note.accidentals))entry.note.accidentals[0]=accidental;
+  if(Array.isArray(entry.note.diatonicMidis))entry.note.diatonicMidis[0]=natural;
+  if(Array.isArray(entry.note.pitches)&&entry.note.pitches.length)entry.note.pitches[0]=midi;
+  if(Array.isArray(entry.note.positions)&&entry.note.positions.length)entry.note.positions[0]={string:position.string,fret:position.fret};
   pendingAccidental=0;render();
 }
 
@@ -1579,6 +1644,7 @@ function importMusicXml(text) {
       note.positionImported=[note.tabImported];
       note.midi = fretNode && fresh.instrument !== 'piano' ? TUNING[string-1] + fret : midi + octaveChange * 12;
       note.diatonicMidi=pitch?midi-Number(pitch.querySelector('alter')?.textContent||0)+octaveChange*12:note.midi;
+      note.diatonicMidis=[note.diatonicMidi];
       note.rest = !!nx.querySelector('rest');
       note.dots=dots;note.ticks=actualTicks;
       note.graceSlash=isGrace&&nx.querySelector(':scope > grace')?.getAttribute('slash')==='yes';
@@ -1602,6 +1668,8 @@ function importMusicXml(text) {
           previous.positionImported.push(note.tabImported);
           previous.accidentals ||= [previous.accidental||null];
           previous.accidentals.push(note.accidental);
+          previous.diatonicMidis ||= [previous.diatonicMidi];
+          previous.diatonicMidis.push(note.diatonicMidi);
           storedNote=previous;
         }
       }
@@ -1705,6 +1773,7 @@ $('#doubleDot').addEventListener('click', () => {
 });
 $('#sharp').addEventListener('click',()=>applyAccidental(1));
 $('#flat').addEventListener('click',()=>applyAccidental(-1));
+$('#natural').addEventListener('click',()=>applyAccidental(0));
 $('#rest').addEventListener('click', () => {restMode=!restMode;updateControls();});
 $('#voice').addEventListener('click', () => {
   const entry=selectedEntry();
@@ -1824,6 +1893,9 @@ document.addEventListener('keydown', (e) => {
     if(score.selection.source==='tab'&&selectedEntry()){
       e.preventDefault();changeFret(digit);return;
     }
+    if(digit==='0'&&selectedEntry()){
+      e.preventDefault();applyAccidental(0);return;
+    }
     const durationByDigit={1:32,2:16,3:8,4:4,5:2};
     if(durationByDigit[digit]){e.preventDefault();changeSelectedDuration(durationByDigit[digit]);return;}
   }
@@ -1867,6 +1939,29 @@ document.querySelectorAll('.toolbar [title]').forEach((control)=>{
   control.dataset.tooltip=control.getAttribute('title');
   control.setAttribute('aria-label',control.getAttribute('aria-label')||control.getAttribute('title'));
 });
+
+// Tooltips inside a horizontally scrolling toolbar are clipped by the
+// scroller on iPad split view. Use a viewport-level tooltip there so pointer
+// hover, keyboard focus, Apple Pencil hover, and touch all show the tool name.
+const compactToolTip=document.createElement('div');
+compactToolTip.className='compact-tool-tooltip';
+compactToolTip.setAttribute('role','status');
+document.body.appendChild(compactToolTip);
+let compactToolTipTimer=null;
+function showCompactToolTip(control){
+  if(!window.matchMedia('(max-width:850px)').matches||!control?.dataset.tooltip)return;
+  clearTimeout(compactToolTipTimer);
+  compactToolTip.textContent=control.dataset.tooltip;
+  compactToolTip.classList.add('visible');
+  const rect=control.getBoundingClientRect();
+  compactToolTip.style.left=`${Math.max(80,Math.min(innerWidth-80,rect.left+rect.width/2))}px`;
+  compactToolTip.style.top=`${Math.min(innerHeight-45,rect.bottom+7)}px`;
+  compactToolTipTimer=setTimeout(()=>compactToolTip.classList.remove('visible'),1800);
+}
+const toolbar=$('.toolbar');
+toolbar.addEventListener('pointerover',(event)=>showCompactToolTip(event.target.closest('[data-tooltip]')));
+toolbar.addEventListener('pointerdown',(event)=>showCompactToolTip(event.target.closest('[data-tooltip]')),{capture:true});
+toolbar.addEventListener('focusin',(event)=>showCompactToolTip(event.target.closest('[data-tooltip]')));
 
 syncMetadataInputs(); updateControls(); render();
 

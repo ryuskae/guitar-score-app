@@ -150,6 +150,22 @@ function noteAtTick(measure,voice,tick){
   return measure.voices[voice].find((note)=>{const match=position===tick;position+=durationTicks(note);return match;})||null;
 }
 
+function firstSelectableEvent(measureIndex,voice,startTick=0,sameMeasureOnly=false,preferPitched=false){
+  const last=sameMeasureOnly?measureIndex:score.measures.length-1;
+  for(let index=measureIndex;index<=last;index++){
+    const measure=score.measures[index];
+    if(!measure)continue;
+    materializeVoiceTicks(measure,voice);
+    const minimum=index===measureIndex?startTick:0;
+    const candidates=(measure.voices[voice]||[])
+      .filter((item)=>!item.grace&&(Number(item.startTick)||0)>=minimum-.001)
+      .sort((a,b)=>(a.startTick||0)-(b.startTick||0));
+    const note=(preferPitched?candidates.find((item)=>!item.rest):null)||candidates[0];
+    if(note)return{measureIndex:index,note,tick:Number(note.startTick)||0};
+  }
+  return null;
+}
+
 function restCoveringTick(measure,voice,tick){
   let sequentialTick=0;
   return measure.voices[voice].find((note)=>{
@@ -1076,7 +1092,11 @@ function addNote(midi) {
       nextMeasure=replacing.measureIndex+1;nextTick=0;
       if(!score.measures[nextMeasure])score.measures.push(createMeasure());
     }
-    score.selection={measure:nextMeasure,voice:replacing.voice,noteId:null,source:'staff',cursorTick:nextTick,rangeEnd:null};
+    ensureEditableRests();
+    const nextEvent=firstSelectableEvent(nextMeasure,replacing.voice,nextTick,false,true);
+    score.selection=nextEvent
+      ?{measure:nextEvent.measureIndex,voice:replacing.voice,noteId:nextEvent.note.id,source:'staff',cursorTick:nextEvent.tick,rangeEnd:null}
+      :{measure:nextMeasure,voice:replacing.voice,noteId:null,source:'staff',cursorTick:nextTick,rangeEnd:null};
     pendingAccidental=0;dotted=false;doubleDotted=false;updateControls();render();return;
   }
   if(cursorInsert&&Math.max(measureTicks(measure,score.activeVoice),targetTick)+newTicks>measureLimit()){
@@ -1269,17 +1289,33 @@ function moveVoiceCursor(direction){
   render();
 }
 
+function syncPrimaryPitch(note,nextMidi,position,{direction=1,octave=false}={}){
+  const previousMidi=note.midi;
+  const currentNatural=note.diatonicMidis?.[0]??note.diatonicMidi;
+  let natural;
+  if(octave&&Number.isFinite(currentNatural))natural=currentNatural+(nextMidi-previousMidi);
+  else if(Number.isFinite(currentNatural)&&Math.abs(nextMidi-currentNatural)<=1)natural=currentNatural;
+  else if(SHARP_PITCH_CLASSES.has(((nextMidi%12)+12)%12))natural=direction<0?nextMidi+1:nextMidi-1;
+  else natural=nextMidi;
+  Object.assign(note,{midi:nextMidi,diatonicMidi:natural,accidental:null});
+  if(position)Object.assign(note,{string:position.string,fret:position.fret});
+  if(Array.isArray(note.pitches)&&note.pitches.length)note.pitches[0]=nextMidi;
+  if(Array.isArray(note.diatonicMidis)&&note.diatonicMidis.length)note.diatonicMidis[0]=natural;
+  if(Array.isArray(note.accidentals)&&note.accidentals.length)note.accidentals[0]=null;
+  if(position&&Array.isArray(note.positions)&&note.positions.length)note.positions[0]={string:position.string,fret:position.fret};
+}
+
 function transposeSelected(direction, octave = false) {
   const entry = selectedEntry(); if (!entry || entry.note.rest) return;
   const nextMidi = entry.note.midi + direction * (octave ? 12 : 1);
   if (score.instrument === 'piano') {
     if (nextMidi < 21 || nextMidi > 108) return;
-    remember(); entry.note.midi=nextMidi; render(); return;
+    remember();syncPrimaryPitch(entry.note,nextMidi,null,{direction,octave});render();return;
   }
   const position = positionsForMidi(nextMidi).sort((a,b)=>a.fret-b.fret||a.string-b.string)[0];
   if (!position) { status.textContent='기타의 연주 가능한 음역을 벗어났습니다.'; return; }
   remember();
-  entry.note.midi=nextMidi; entry.note.string=position.string; entry.note.fret=position.fret;
+  syncPrimaryPitch(entry.note,nextMidi,position,{direction,octave});
   render();
 }
 
@@ -1289,14 +1325,17 @@ function moveTabAcrossStrings(direction) {
   const current=choices.findIndex((position)=>position.string===entry.note.string);
   const next=choices[current+direction];
   if(!next) return;
-  remember(); entry.note.string=next.string;entry.note.fret=next.fret;render();
+  remember();entry.note.string=next.string;entry.note.fret=next.fret;
+  if(Array.isArray(entry.note.positions)&&entry.note.positions.length)entry.note.positions[0]={string:next.string,fret:next.fret};
+  render();
 }
 
 function changeFret(digit) {
   const entry = selectedEntry(); if (!entry || entry.note.rest) return;
   fretBuffer = (fretBuffer + digit).slice(-2);
   const fret = Math.min(30, Number(fretBuffer));
-  remember(); entry.note.fret = fret; entry.note.midi = TUNING[entry.note.string-1] + fret; render();
+  const nextMidi=TUNING[entry.note.string-1]+fret;
+  remember();syncPrimaryPitch(entry.note,nextMidi,{string:entry.note.string,fret},{direction:1});render();
 }
 
 function applyAccidental(value) {
@@ -1778,8 +1817,14 @@ $('#rest').addEventListener('click', () => {restMode=!restMode;updateControls();
 $('#voice').addEventListener('click', () => {
   const entry=selectedEntry();
   const cursorTick=entry?notePosition(entry.note,entry.measure,entry.voice):(score.selection.cursorTick??0);
+  const measureIndex=score.selection.measure;
+  const previousSource=score.selection.source||'staff';
   score.activeVoice=(score.activeVoice+1)%Math.max(1,score.voiceCount||1);
-  score.selection={measure:score.selection.measure,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:Math.min(measureLimit(),cursorTick),rangeEnd:null};
+  ensureEditableRests();
+  const first=firstSelectableEvent(measureIndex,score.activeVoice,0,true,true);
+  score.selection=first
+    ?{measure:measureIndex,voice:score.activeVoice,noteId:first.note.id,source:first.note.rest?'staff':previousSource,cursorTick:first.tick,rangeEnd:null}
+    :{measure:measureIndex,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:Math.min(measureLimit(),cursorTick),rangeEnd:null};
   updateControls();render();
 });
 $('#addVoice').addEventListener('click',()=>{

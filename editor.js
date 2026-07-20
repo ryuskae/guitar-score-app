@@ -1085,6 +1085,7 @@ function addNote(midi) {
     const position=bestPosition(midi,replacing.measure,replacing.voice,start);
     Object.assign(replacing.note,{midi,diatonicMidi:naturalMidi,accidental:pendingAccidental===1?'sharp':pendingAccidental===-1?'flat':null,string:position.string,fret:position.fret,duration,dots:inputDots,dotted:inputDots>0,rest:restMode,grace:graceMode,startTick:start,ticks:newTicks,measureRest:false});
     delete replacing.note.pitches;delete replacing.note.positions;delete replacing.note.positionImported;delete replacing.note.tabImported;
+    delete replacing.note.diatonicMidis;delete replacing.note.accidentals;
     delete replacing.note.tuplet;
     overwriteFollowingEvents(replacing.measure,replacing.voice,replacing.note,replacingAtCaret?start:originalEnd,newEnd);
     let nextMeasure=replacing.measureIndex,nextTick=start+newTicks;
@@ -1358,12 +1359,34 @@ function applyAccidental(value) {
   pendingAccidental=0;render();
 }
 
+function toggleEnharmonic(){
+  const entry=selectedEntry();
+  if(!entry||entry.note.rest){status.textContent='동음이명으로 바꿀 오선 음표를 먼저 선택하세요.';return;}
+  const midi=entry.note.midi;
+  const currentNatural=entry.note.diatonicMidis?.[0]??entry.note.diatonicMidi;
+  const candidates=[];
+  for(let natural=midi-1;natural<=midi+1;natural++){
+    if(NATURAL_NAME_BY_PC[((natural%12)+12)%12])candidates.push(natural);
+  }
+  if(candidates.length<2){status.textContent='이 음에는 일반적으로 사용하는 다른 표기가 없습니다.';return;}
+  const currentIndex=candidates.findIndex((natural)=>natural===currentNatural);
+  const natural=candidates[(currentIndex<0?0:currentIndex+1)%candidates.length];
+  const alter=midi-natural;
+  const accidental=alter===1?'sharp':alter===-1?'flat':'natural';
+  remember();
+  entry.note.diatonicMidi=natural;
+  entry.note.accidental=accidental;
+  if(Array.isArray(entry.note.diatonicMidis)&&entry.note.diatonicMidis.length)entry.note.diatonicMidis[0]=natural;
+  if(Array.isArray(entry.note.accidentals)&&entry.note.accidentals.length)entry.note.accidentals[0]=accidental;
+  render();
+}
+
 function deleteSelected() {
   const entry = selectedEntry(); if (!entry) return;
   remember();
   const ticks=durationTicks(entry.note),start=notePosition(entry.note,entry.measure,entry.voice);
   Object.assign(entry.note,{rest:true,grace:false,startTick:start,ticks,measureRest:start===0&&Math.abs(ticks-measureLimit())<.001});
-  delete entry.note.pitches;delete entry.note.positions;delete entry.note.positionImported;delete entry.note.tabImported;delete entry.note.tuplet;delete entry.note.accidental;delete entry.note.accidentals;
+  delete entry.note.pitches;delete entry.note.positions;delete entry.note.positionImported;delete entry.note.tabImported;delete entry.note.tuplet;delete entry.note.accidental;delete entry.note.accidentals;delete entry.note.diatonicMidis;
   score.annotations = score.annotations.filter((a) => a.start.noteId !== entry.note.id && a.end.noteId !== entry.note.id);
   render();
 }
@@ -1813,6 +1836,7 @@ $('#doubleDot').addEventListener('click', () => {
 $('#sharp').addEventListener('click',()=>applyAccidental(1));
 $('#flat').addEventListener('click',()=>applyAccidental(-1));
 $('#natural').addEventListener('click',()=>applyAccidental(0));
+$('#enharmonic').addEventListener('click',toggleEnharmonic);
 $('#rest').addEventListener('click', () => {restMode=!restMode;updateControls();});
 $('#voice').addEventListener('click', () => {
   const entry=selectedEntry();

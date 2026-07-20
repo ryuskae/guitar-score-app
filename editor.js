@@ -547,9 +547,10 @@ function vexKey(midi) {
 
 function naturalMidiForKey(note,keyIndex,midi,explicitAccidental){
   const stored=note.diatonicMidis?.[keyIndex]??(keyIndex===0?note.diatonicMidi:null);
-  if(Number.isFinite(stored))return stored;
+  if(Number.isFinite(stored)&&Math.abs(midi-stored)<=2&&NATURAL_NAME_BY_PC[((stored%12)+12)%12])return stored;
   const explicitAlter=ACCIDENTAL_ALTER[explicitAccidental];
-  if(Number.isFinite(explicitAlter))return midi-explicitAlter;
+  const explicitNatural=midi-explicitAlter;
+  if(Number.isFinite(explicitAlter)&&NATURAL_NAME_BY_PC[((explicitNatural%12)+12)%12])return explicitNatural;
   return SHARP_PITCH_CLASSES.has(((midi%12)+12)%12)?midi-1:midi;
 }
 
@@ -583,9 +584,10 @@ function displayedAccidentalsForMeasure(measure,fifths){
     if(note.rest)return;
     const midis=note.pitches?.length?note.pitches:[note.midi];
     midis.forEach((midi,keyIndex)=>{
-      const explicit=note.accidentals?.[keyIndex]??(keyIndex===0?note.accidental:null);
-      const natural=naturalMidiForKey(note,keyIndex,midi,explicit);
-      const actualAlter=Math.max(-2,Math.min(2,Math.round(midi-natural)));
+      const rawExplicit=note.accidentals?.[keyIndex]??(keyIndex===0?note.accidental:null);
+      const natural=naturalMidiForKey(note,keyIndex,midi,rawExplicit);
+      const actualAlter=Math.round(midi-natural);
+      const explicit=ACCIDENTAL_ALTER[rawExplicit]===actualAlter?rawExplicit:null;
       const stateKey=String(natural);
       const previous=state.has(stateKey)?state.get(stateKey):keySignatureAlter(natural,fifths);
       const accidental=explicit||(actualAlter!==previous?ALTER_ACCIDENTAL[actualAlter]:null);
@@ -1292,7 +1294,8 @@ function moveVoiceCursor(direction){
 
 function syncPrimaryPitch(note,nextMidi,position,{direction=1,octave=false}={}){
   const previousMidi=note.midi;
-  const currentNatural=note.diatonicMidis?.[0]??note.diatonicMidi;
+  const rawExplicit=note.accidentals?.[0]??note.accidental;
+  const currentNatural=naturalMidiForKey(note,0,previousMidi,rawExplicit);
   let natural;
   if(octave&&Number.isFinite(currentNatural))natural=currentNatural+(nextMidi-previousMidi);
   else if(Number.isFinite(currentNatural)&&Math.abs(nextMidi-currentNatural)<=1)natural=currentNatural;
@@ -1347,8 +1350,8 @@ function applyAccidental(value) {
     updateControls();return;
   }
   remember();
-  const oldDelta=entry.note.accidental==='sharp'?1:entry.note.accidental==='flat'?-1:0;
-  const natural=Number.isFinite(entry.note.diatonicMidi)?entry.note.diatonicMidi:entry.note.midi-oldDelta;
+  const rawExplicit=entry.note.accidentals?.[0]??entry.note.accidental;
+  const natural=naturalMidiForKey(entry.note,0,entry.note.midi,rawExplicit);
   const midi=natural+value,position=bestPosition(midi,entry.measure,entry.voice,notePosition(entry.note,entry.measure,entry.voice));
   const accidental=value===1?'sharp':value===-1?'flat':'natural';
   Object.assign(entry.note,{midi,diatonicMidi:natural,accidental,string:position.string,fret:position.fret});
@@ -1363,16 +1366,25 @@ function toggleEnharmonic(){
   const entry=selectedEntry();
   if(!entry||entry.note.rest){status.textContent='동음이명으로 바꿀 오선 음표를 먼저 선택하세요.';return;}
   const midi=entry.note.midi;
-  const currentNatural=entry.note.diatonicMidis?.[0]??entry.note.diatonicMidi;
-  const candidates=[];
-  for(let natural=midi-1;natural<=midi+1;natural++){
-    if(NATURAL_NAME_BY_PC[((natural%12)+12)%12])candidates.push(natural);
+  const rawExplicit=entry.note.accidentals?.[0]??entry.note.accidental;
+  const currentNatural=naturalMidiForKey(entry.note,0,midi,rawExplicit);
+  const allCandidates=[];
+  for(let natural=midi-2;natural<=midi+2;natural++){
+    if(NATURAL_NAME_BY_PC[((natural%12)+12)%12])allCandidates.push(natural);
   }
-  if(candidates.length<2){status.textContent='이 음에는 일반적으로 사용하는 다른 표기가 없습니다.';return;}
+  const simple=allCandidates.filter((natural)=>Math.abs(midi-natural)<=1);
+  let candidates=simple;
+  if(simple.length<2){
+    const simpleNatural=simple[0]??currentNatural;
+    const upperDouble=allCandidates.find((natural)=>natural>simpleNatural&&Math.abs(midi-natural)===2);
+    const lowerDouble=[...allCandidates].reverse().find((natural)=>natural<simpleNatural&&Math.abs(midi-natural)===2);
+    candidates=[simpleNatural,upperDouble??lowerDouble].filter(Number.isFinite);
+  }
+  if(candidates.length<2){status.textContent='이 음의 동음이명 표기를 만들 수 없습니다.';return;}
   const currentIndex=candidates.findIndex((natural)=>natural===currentNatural);
   const natural=candidates[(currentIndex<0?0:currentIndex+1)%candidates.length];
   const alter=midi-natural;
-  const accidental=alter===1?'sharp':alter===-1?'flat':'natural';
+  const accidental=ALTER_ACCIDENTAL[alter];
   remember();
   entry.note.diatonicMidi=natural;
   entry.note.accidental=accidental;

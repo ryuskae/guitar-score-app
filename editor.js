@@ -77,7 +77,7 @@ function setSelection(measure, voice, noteId = null, extend = false, source = 's
       const selectedDots=targetNote.dots??(targetNote.dotted?1:0);
       dotted=selectedDots===1;doubleDotted=selectedDots===2;
     }
-    const cursorTick=targetNote?notePosition(targetNote,targetMeasure,voice):Math.min(measureLimit(),measureTicks(targetMeasure,voice));
+    const cursorTick=targetNote?notePosition(targetNote,targetMeasure,voice):Math.min(measureLimit(targetMeasure),measureTicks(targetMeasure,voice));
     score.selection = { measure, voice, noteId, source, cursorTick, rangeEnd: null };
     score.activeVoice = voice;
   }
@@ -176,32 +176,56 @@ function restCoveringTick(measure,voice,tick){
   })||null;
 }
 
-function measureLimit() { return timeSignatureTicks(score.timeSignature); }
+function measureAt(measureOrIndex) {
+  return typeof measureOrIndex==='number'?score.measures[measureOrIndex]:measureOrIndex;
+}
+
+// A pickup (anacrusis) measure carries its own time signature; every other
+// measure follows the score-wide one.
+function measureTimeSignature(measureOrIndex) {
+  const measure=measureAt(measureOrIndex);
+  return measure?.pickup&&measure.timeSignature?measure.timeSignature:score.timeSignature;
+}
+
+function sameTimeSignature(a,b) { return !!a&&!!b&&a.beats===b.beats&&a.beatType===b.beatType; }
+
+function timeSignatureChangesAt(index) {
+  return index===0||!sameTimeSignature(measureTimeSignature(index),measureTimeSignature(index-1));
+}
+
+function measureLimit(measureOrIndex=score.selection.measure) { return timeSignatureTicks(measureTimeSignature(measureOrIndex)); }
+
+function displayMeasureNumber(index) { return index+(score.measures[0]?.pickup?0:1); }
+
+function measureLabel(index) { return score.measures[index]?.pickup?'픽업 마디':`${displayMeasureNumber(index)}마디`; }
 
 function restParts(totalTicks, startTick=0) {
   const values=[32,24,16,12,8,6,4,3,2,1],parts=[];
   let remaining=Math.max(0,totalTicks),tick=startTick;
-  for(const ticks of values){
-    while(remaining>=ticks-.001){
-      const dottedValue=[24,12,6,3].includes(ticks),base=dottedValue?ticks/1.5:ticks;
-      const note=noteFromStringFret(1,0,base,dottedValue,false);
-      note.rest=true;note.dots=dottedValue?1:0;note.startTick=tick;note.ticks=ticks;
-      parts.push(note);tick+=ticks;remaining-=ticks;
-    }
+  // Prefer rests that start on a multiple of their own length, so a gap
+  // after an off-beat event first fills up to the beat (8th, quarter, half).
+  const aligned=(ticks)=>Math.abs(tick/ticks-Math.round(tick/ticks))<.001;
+  while(remaining>=1-.001){
+    const fits=values.filter((ticks)=>ticks<=remaining+.001);
+    const ticks=fits.find(aligned)??fits[0];
+    const dottedValue=[24,12,6,3].includes(ticks),base=dottedValue?ticks/1.5:ticks;
+    const note=noteFromStringFret(1,0,base,dottedValue,false);
+    note.rest=true;note.dots=dottedValue?1:0;note.startTick=tick;note.ticks=ticks;
+    parts.push(note);tick+=ticks;remaining-=ticks;
   }
   return parts;
 }
 
-function fullMeasureRest() {
+function fullMeasureRest(measure) {
   const note=noteFromStringFret(1,0,32,false,false);
-  note.rest=true;note.measureRest=true;note.startTick=0;note.ticks=measureLimit();
+  note.rest=true;note.measureRest=true;note.startTick=0;note.ticks=measureLimit(measure);
   return note;
 }
 
 function ensureEditableRests() {
   score.voiceCount=Math.max(1,Math.min(4,Number(score.voiceCount)||1));
   score.measures.forEach((measure,index)=>{
-    for(let voice=0;voice<score.voiceCount;voice++)if(measure.voices[voice].length===0&&!measure.deletedVoices?.includes(voice))measure.voices[voice].push(fullMeasureRest());
+    for(let voice=0;voice<score.voiceCount;voice++)if(measure.voices[voice].length===0&&!measure.deletedVoices?.includes(voice))measure.voices[voice].push(fullMeasureRest(measure));
   });
 }
 
@@ -222,7 +246,7 @@ function setNoteTicks(note, ticks) {
 }
 
 function normalizeVoiceToMeasure(measure, voiceIndex) {
-  const limit=measureLimit(),voice=measure.voices[voiceIndex];
+  const limit=measureLimit(measure),voice=measure.voices[voiceIndex];
   voice.sort((a,b)=>(a.startTick??0)-(b.startTick??0));
   const kept=[];
   voice.forEach((note)=>{
@@ -243,10 +267,10 @@ function removeAnnotationsForNotes(noteIds) {
 
 // Rebuild rests around fixed musical events. Editing a duration therefore
 // overwrites its time range instead of pushing later notes to the right.
-function rebuildVoiceRests(measure, voiceIndex) {
-  const limit=measureLimit();
+function rebuildVoiceRests(measure, voiceIndex, keepRest=null) {
+  const limit=measureLimit(measure);
   const events=measure.voices[voiceIndex]
-    .filter((note)=>!note.rest)
+    .filter((note)=>!note.rest||note===keepRest)
     .sort((a,b)=>(a.startTick??0)-(b.startTick??0)||(a.grace?-1:1));
   const rebuilt=[];
   let cursor=0;
@@ -260,8 +284,11 @@ function rebuildVoiceRests(measure, voiceIndex) {
   measure.voices[voiceIndex]=rebuilt.sort((a,b)=>(a.startTick??0)-(b.startTick??0)||(a.grace?-1:1));
 }
 
+// A selected rest whose length was edited is kept as an event, so the edit is
+// not merged back into the surrounding rests.
 function overwriteFollowingEvents(measure, voiceIndex, keepNote, oldEnd, newEnd) {
-  if(newEnd<=oldEnd+.001){rebuildVoiceRests(measure,voiceIndex);return;}
+  const keepRest=keepNote?.rest?keepNote:null;
+  if(newEnd<=oldEnd+.001){rebuildVoiceRests(measure,voiceIndex,keepRest);return;}
   const removed=new Set();
   measure.voices[voiceIndex]=measure.voices[voiceIndex].filter((note)=>{
     if(note===keepNote||note.rest||note.grace)return true;
@@ -271,7 +298,7 @@ function overwriteFollowingEvents(measure, voiceIndex, keepNote, oldEnd, newEnd)
     return !overlaps;
   });
   removeAnnotationsForNotes(removed);
-  rebuildVoiceRests(measure,voiceIndex);
+  rebuildVoiceRests(measure,voiceIndex,keepRest);
 }
 
 function changeSelectedDuration(newDuration) {
@@ -281,9 +308,9 @@ function changeSelectedDuration(newDuration) {
   materializeVoiceTicks(entry.measure,entry.voice);
   const start=notePosition(entry.note,entry.measure,entry.voice);
   const oldEnd=start+durationTicks(entry.note),newEnd=start+newDuration;
-  if(newEnd>measureLimit()+.001){showMeasureWarning(entry.measureIndex);updateControls();return;}
+  if(newEnd>measureLimit(entry.measure)+.001){showMeasureWarning(entry.measureIndex);updateControls();return;}
   remember();
-  Object.assign(entry.note,{duration:newDuration,dots:0,dotted:false,ticks:newDuration,measureRest:entry.note.rest&&start===0&&Math.abs(newDuration-measureLimit())<.001});
+  Object.assign(entry.note,{duration:newDuration,dots:0,dotted:false,ticks:newDuration,measureRest:entry.note.rest&&start===0&&Math.abs(newDuration-measureLimit(entry.measure))<.001});
   delete entry.note.tuplet;
   overwriteFollowingEvents(entry.measure,entry.voice,entry.note,oldEnd,newEnd);
   dotted=false;doubleDotted=false;
@@ -297,7 +324,7 @@ function changeSelectedDots(nextDots) {
   const start=notePosition(entry.note,entry.measure,entry.voice);
   const oldEnd=start+durationTicks(entry.note);
   const newTicks=entry.note.duration*dotMultiplier(nextDots),newEnd=start+newTicks;
-  if(newEnd>measureLimit()+.001){showMeasureWarning(entry.measureIndex);return true;}
+  if(newEnd>measureLimit(entry.measure)+.001){showMeasureWarning(entry.measureIndex);return true;}
   remember();
   Object.assign(entry.note,{dots:nextDots,dotted:nextDots>0,ticks:newTicks,measureRest:false});
   overwriteFollowingEvents(entry.measure,entry.voice,entry.note,oldEnd,newEnd);
@@ -407,7 +434,8 @@ function beamData(measure, voice) {
   const levels = new Map();
   const groups = [];
   const imported=measure.voices[voice];
-  const conventionalFourFour=score.timeSignature.beats===4&&score.timeSignature.beatType===4;
+  const timeSignature=measureTimeSignature(measure);
+  const conventionalFourFour=timeSignature.beats===4&&timeSignature.beatType===4;
   if(imported.some((note)=>note.beams?.length)&&!conventionalFourFour){
     let current=[];
     const flush=()=>{if(current.length>1)groups.push(current);current=[];};
@@ -423,12 +451,12 @@ function beamData(measure, voice) {
     flush();
     return {levels,groups};
   }
-  const beatLength = 8 * (4 / score.timeSignature.beatType);
-  const compound = score.timeSignature.beatType === 8 && score.timeSignature.beats >= 6 && score.timeSignature.beats % 3 === 0;
+  const beatLength = 8 * (4 / timeSignature.beatType);
+  const compound = timeSignature.beatType === 8 && timeSignature.beats >= 6 && timeSignature.beats % 3 === 0;
   // In 4/4, consecutive eighths conventionally read as 1–2 | 3–4:
   // four eighths per beam.  Sixteenths still reveal every quarter-note beat.
-  const eighthGroupLength = score.timeSignature.beats === 4 && score.timeSignature.beatType === 4
-    ? beatLength * 2 : groupingTicks(score.timeSignature);
+  const eighthGroupLength = timeSignature.beats === 4 && timeSignature.beatType === 4
+    ? beatLength * 2 : groupingTicks(timeSignature);
   let tick = 0, current = [], groupIndex = null;
   const flush = () => {
     if (current.length > 1) {
@@ -442,7 +470,7 @@ function beamData(measure, voice) {
   };
   for (const note of measure.voices[voice]) {
     const groupLength = (note.duration <= 2 || current.some((item) => item.note.duration <= 2))
-      ? (compound ? groupingTicks(score.timeSignature) : beatLength) : eighthGroupLength;
+      ? (compound ? groupingTicks(timeSignature) : beatLength) : eighthGroupLength;
     const currentGroup=Math.floor(tick / groupLength);
     if (note.rest || note.duration > 4 || (groupIndex !== null && currentGroup !== groupIndex)) flush();
     if (!note.rest && note.duration <= 4) {
@@ -781,7 +809,7 @@ function render() {
     const firstMeasureAllowance=Math.min(usable*.25,72*densityScale);
     const minimumMeasureWidth=Math.min(105*densityScale,(usable-firstMeasureAllowance)/items.length*.72);
     const distributable=Math.max(0,usable-firstMeasureAllowance-minimumMeasureWidth*items.length);
-    const layoutWeights=items.map(({measure})=>measureLayoutWeight(measure));
+    const layoutWeights=items.map(({measure,index},localIndex)=>measureLayoutWeight(measure)+(localIndex>0&&timeSignatureChangesAt(index)?1.2:0));
     const totalWeight=layoutWeights.reduce((sum,value)=>sum+value,0)||1;
     const measureWidths=layoutWeights.map((weight,index)=>minimumMeasureWidth+distributable*weight/totalWeight+(index===0?firstMeasureAllowance:0));
     let runningX=left;
@@ -797,13 +825,14 @@ function render() {
       if(localIndex===0){
         staff.addClef('treble','default',piano?undefined:'8vb');
         staff.addKeySignature(KEY_BY_FIFTHS[Math.max(0,Math.min(14,currentKeyFifths+7))]);
-        if(systemIndex===0)staff.addTimeSignature(score.timeSymbol==='common'?'C':`${score.timeSignature.beats}/${score.timeSignature.beatType}`);
         if(systemIndex===0&&score.tempo)staff.setTempo({duration:'q',bpm:score.tempo},-18);
         lower?.addClef(piano?'bass':'tab');
         firstStaff=staff;firstLower=lower;
       }else if(keyChanged){
         staff.addKeySignature(KEY_BY_FIFTHS[Math.max(0,Math.min(14,currentKeyFifths+7))]);
       }
+      const measureTime=measureTimeSignature(measure);
+      if(timeSignatureChangesAt(index))staff.addTimeSignature(score.timeSymbol==='common'&&!measure.pickup&&sameTimeSignature(measureTime,{beats:4,beatType:4})?'C':`${measureTime.beats}/${measureTime.beatType}`);
       if(measure.repeatStart){staff.setBegBarType(VF.Barline.type.REPEAT_BEGIN);lower?.setBegBarType(VF.Barline.type.REPEAT_BEGIN);}
       if(measure.repeatEnd){staff.setEndBarType(VF.Barline.type.REPEAT_END);lower?.setEndBarType(VF.Barline.type.REPEAT_END);}
       VF.Stave.formatBegModifiers(lower?[staff,lower]:[staff]);
@@ -875,7 +904,7 @@ function render() {
         });
         staffNotes.forEach((note)=>note.setStave(staff));
         if(lower)tabNotes.forEach((note)=>note.setStave(lower));
-        const time={num_beats:score.timeSignature.beats,beat_value:score.timeSignature.beatType};
+        const time={num_beats:measureTime.beats,beat_value:measureTime.beatType};
         const sv=new VF.Voice(time).setMode(VF.Voice.Mode.SOFT).addTickables(staffNotes).setStave(staff);
         const tv=lower?new VF.Voice(time).setMode(VF.Voice.Mode.SOFT).addTickables(tabNotes).setStave(lower):null;
         staffVoices.push(sv);if(tv)tabVoices.push(tv);
@@ -956,7 +985,7 @@ function render() {
           if(note.dynamic)svg('text',{x:noteX-5,y:bottomY+23*densityScale,text:note.dynamic,class:'dynamic-mark','font-size':15*densityScale,'font-family':'serif','font-style':'italic','font-weight':'bold'});
         }));
       }
-      if(localIndex===0)svg('text',{x:x+20,y:staffTop-18,text:String(index+1),class:'measure-number','font-size':15,'font-family':'Arial, sans-serif','font-weight':'700',fill:'#334155'});
+      if(localIndex===0&&!measure.pickup)svg('text',{x:x+20,y:staffTop-18,text:String(displayMeasureNumber(index)),class:'measure-number','font-size':15,'font-family':'Arial, sans-serif','font-weight':'700',fill:'#334155'});
       if(measureWarning?.measureIndex===index){
         const warningWidth=Math.min(measureWidth-12,210),warningX=x+(measureWidth-warningWidth)/2;
         svg('rect',{x:warningX,y:staffTop-37,width:warningWidth,height:21,rx:5,class:'measure-warning-bg'});
@@ -991,8 +1020,8 @@ function render() {
   drawAnnotations(layouts);
   const entry = selectedEntry();
   status.textContent = entry
-    ? `성부 ${entry.voice+1}(${VOICE_COLORS[entry.voice]}) · ${entry.measureIndex+1}마디 · ${entry.note.string}번 줄 ${entry.note.fret}프렛 · MIDI ${entry.note.midi}`
-    : `성부 ${score.activeVoice+1}(${VOICE_COLORS[score.activeVoice]}) · ${score.selection.measure+1}마디 · ${Number((((score.selection.cursorTick??0)/(8*(4/score.timeSignature.beatType)))+1).toFixed(2))}박 위치`;
+    ? `성부 ${entry.voice+1}(${VOICE_COLORS[entry.voice]}) · ${measureLabel(entry.measureIndex)} · ${entry.note.string}번 줄 ${entry.note.fret}프렛 · MIDI ${entry.note.midi}`
+    : `성부 ${score.activeVoice+1}(${VOICE_COLORS[score.activeVoice]}) · ${measureLabel(score.selection.measure)} · ${Number((((score.selection.cursorTick??0)/(8*(4/measureTimeSignature(score.selection.measure).beatType)))+1).toFixed(2))}박 위치`;
 }
 
 scoreSvg.setAttribute('tabindex','0');
@@ -1013,6 +1042,14 @@ function updateControls() {
   $('#toggleTab').classList.toggle('active', score.showTab!==false);
   $('#toggleTab').textContent=score.showTab===false?'타브 보이기':'타브 숨기기';
   $('#toggleTab').disabled=score.instrument==='piano';
+  const pickupMeasure=score.measures[0];
+  $('#pickup').classList.toggle('active',!!pickupMeasure?.pickup);
+  if(pickupMeasure?.pickup){
+    const value=`${pickupMeasure.timeSignature.beats}/${pickupMeasure.timeSignature.beatType}`;
+    const select=$('#pickupTimeSignature');
+    if(![...select.options].some((option)=>option.value===value))select.add(new Option(value,value));
+    select.value=value;
+  }
   document.querySelectorAll('[data-duration]').forEach((b) => b.classList.toggle('active', Number(b.dataset.duration) === duration));
 }
 
@@ -1053,13 +1090,51 @@ function keyAdjustedMidi(midi) {
   return midi;
 }
 
+function diatonicIndex(naturalMidi) {
+  const pitchClass=((naturalMidi%12)+12)%12;
+  return (Math.floor(naturalMidi/12)-1)*7+DIATONIC_STEP[pitchClass];
+}
+
+// The pitched note heard just before the insertion point in the active voice.
+function previousPitchedNote(measureIndex, tick, beforeNoteId=null) {
+  const entries=selectionOrder().filter((entry)=>entry.voice===score.activeVoice);
+  let limit=beforeNoteId?entries.findIndex((entry)=>entry.note.id===beforeNoteId):-1;
+  if(limit<0)limit=entries.findIndex((entry)=>entry.measure>measureIndex||(entry.measure===measureIndex&&entry.tick>=tick-.001));
+  if(limit<0)limit=entries.length;
+  for(let index=limit-1;index>=0;index--)if(!entries[index].note.rest)return entries[index].note;
+  return null;
+}
+
+// Letter keys pick the octave closest (by staff steps) to the previous note,
+// e.g. C4 followed by G gives G3. Without a previous note the default octave
+// is kept. The result is moved back into the instrument's range if needed.
+function nearestLetterMidi(letterMidi, reference) {
+  const pitchClass=((letterMidi%12)+12)%12;
+  let natural=letterMidi;
+  if(reference){
+    const rawExplicit=reference.accidentals?.[0]??reference.accidental;
+    const referenceDiatonic=diatonicIndex(naturalMidiForKey(reference,0,reference.midi,rawExplicit));
+    const octave=Math.round((referenceDiatonic-DIATONIC_STEP[pitchClass])/7);
+    natural=(octave+1)*12+pitchClass;
+  }
+  const [low,high]=score.instrument==='piano'?[21,108]:[TUNING.at(-1),TUNING[0]+24];
+  const sounding=(value)=>pendingAccidental?value+pendingAccidental:keyAdjustedMidi(value);
+  while(sounding(natural)<low)natural+=12;
+  while(sounding(natural)>high)natural-=12;
+  return natural;
+}
+
 function addNote(midi) {
+  const insertionSelection=selectedEntry();
+  const referenceTick=!insertionSelection&&Number.isFinite(score.selection.cursorTick)&&!score.selection.noteId
+    ?score.selection.cursorTick:Infinity;
+  midi=nearestLetterMidi(midi,previousPitchedNote(score.selection.measure,referenceTick,insertionSelection?.note.id));
   const naturalMidi=midi;
   midi=pendingAccidental?naturalMidi+pendingAccidental:keyAdjustedMidi(naturalMidi);
   let measureIndex = score.selection.measure;
   let measure = score.measures[measureIndex];
   const cursorInsert=!score.selection.noteId&&Number.isFinite(score.selection.cursorTick);
-  const targetTick=cursorInsert?Math.max(0,Math.min(measureLimit(),score.selection.cursorTick)):measureTicks(measure,score.activeVoice);
+  const targetTick=cursorInsert?Math.max(0,Math.min(measureLimit(measure),score.selection.cursorTick)):measureTicks(measure,score.activeVoice);
   const inputDots=doubleDotted?2:(dotted?1:0);
   const newTicks=duration*dotMultiplier(inputDots);
   const selected=selectedEntry();
@@ -1082,7 +1157,7 @@ function addNote(midi) {
     const originalStart=replacing.note.startTick,originalEnd=originalStart+durationTicks(replacing.note);
     const start=replacingAtCaret?targetTick:originalStart;
     const newEnd=start+newTicks;
-    if(newEnd>measureLimit()+.001){showMeasureWarning(replacing.measureIndex);return;}
+    if(newEnd>measureLimit(replacing.measure)+.001){showMeasureWarning(replacing.measureIndex);return;}
     remember();
     const position=bestPosition(midi,replacing.measure,replacing.voice,start);
     Object.assign(replacing.note,{midi,diatonicMidi:naturalMidi,accidental:pendingAccidental===1?'sharp':pendingAccidental===-1?'flat':null,string:position.string,fret:position.fret,duration,dots:inputDots,dotted:inputDots>0,rest:restMode,grace:graceMode,startTick:start,ticks:newTicks,measureRest:false});
@@ -1091,7 +1166,7 @@ function addNote(midi) {
     delete replacing.note.tuplet;
     overwriteFollowingEvents(replacing.measure,replacing.voice,replacing.note,replacingAtCaret?start:originalEnd,newEnd);
     let nextMeasure=replacing.measureIndex,nextTick=start+newTicks;
-    if(nextTick>=measureLimit()){
+    if(nextTick>=measureLimit(replacing.measure)){
       nextMeasure=replacing.measureIndex+1;nextTick=0;
       if(!score.measures[nextMeasure])score.measures.push(createMeasure());
     }
@@ -1102,12 +1177,12 @@ function addNote(midi) {
       :{measure:nextMeasure,voice:replacing.voice,noteId:null,source:'staff',cursorTick:nextTick,rangeEnd:null};
     pendingAccidental=0;dotted=false;doubleDotted=false;updateControls();render();return;
   }
-  if(cursorInsert&&Math.max(measureTicks(measure,score.activeVoice),targetTick)+newTicks>measureLimit()){
+  if(cursorInsert&&Math.max(measureTicks(measure,score.activeVoice),targetTick)+newTicks>measureLimit(measure)){
     showMeasureWarning(measureIndex);return;
   }
   remember();
   if(measure.deletedVoices?.includes(score.activeVoice))measure.deletedVoices=measure.deletedVoices.filter((voice)=>voice!==score.activeVoice);
-  if (measureTicks(measure, score.activeVoice) + newTicks > measureLimit()) {
+  if (measureTicks(measure, score.activeVoice) + newTicks > measureLimit(measure)) {
     measureIndex++;
     if (!score.measures[measureIndex]) score.measures.push(createMeasure());
     measure = score.measures[measureIndex];
@@ -1126,14 +1201,14 @@ function addNote(midi) {
     voice.splice(index,0,note);
   }else voice.push(note);
   let nextMeasure=measureIndex,nextTick=insertionTick+newTicks;
-  if(nextTick>=measureLimit()){
+  if(nextTick>=measureLimit(measure)){
     nextMeasure=measureIndex+1;nextTick=0;
     if(!score.measures[nextMeasure])score.measures.push(createMeasure());
   }
   // A newly entered note advances the insertion caret. Clicking an existing
   // note still selects it, so the next pitch replaces that selected event.
   score.selection = { measure:nextMeasure, voice:score.activeVoice, noteId:null, source:'staff', cursorTick:nextTick, rangeEnd:null };
-  if (measureTicks(measure, score.activeVoice) >= measureLimit() && measureIndex === score.measures.length - 1) score.measures.push(createMeasure());
+  if (measureTicks(measure, score.activeVoice) >= measureLimit(measure) && measureIndex === score.measures.length - 1) score.measures.push(createMeasure());
   graceMode = false;
   pendingAccidental = 0;
   dotted = false;
@@ -1184,7 +1259,7 @@ function addTiedContinuation() {
   materializeVoiceTicks(entry.measure,entry.voice);
   let targetMeasureIndex=entry.measureIndex;
   let targetTick=notePosition(entry.note,entry.measure,entry.voice)+durationTicks(entry.note);
-  if(targetTick>=measureLimit()-.001){
+  if(targetTick>=measureLimit(entry.measure)-.001){
     targetMeasureIndex++;
     targetTick=0;
   }
@@ -1199,7 +1274,7 @@ function addTiedContinuation() {
     score.annotations.push({type:'tie',start:{measure:entry.measureIndex,voice:entry.voice,noteId:entry.note.id},end:{measure:targetMeasureIndex,voice:entry.voice,noteId:existing.id}});
     render();return;
   }
-  const available=measureLimit()-targetTick;
+  const available=measureLimit(targetMeasureIndex)-targetTick;
   const continuationTicks=Math.min(durationTicks(entry.note),available);
   if(continuationTicks<1-.001){status.textContent='타이를 입력할 박이 없습니다.';return;}
   remember();
@@ -1285,9 +1360,9 @@ function moveSelection(delta) {
 function moveVoiceCursor(direction){
   const step=duration*(dotted?1.5:1);
   let measureIndex=score.selection.measure,tick=(score.selection.cursorTick??0)+direction*step;
-  if(tick<0&&measureIndex>0){measureIndex--;tick=Math.max(0,measureLimit()-step);}
-  else if(tick>measureLimit()&&measureIndex<score.measures.length-1){measureIndex++;tick=0;}
-  tick=Math.max(0,Math.min(measureLimit(),tick));
+  if(tick<0&&measureIndex>0){measureIndex--;tick=Math.max(0,measureLimit(measureIndex)-step);}
+  else if(tick>measureLimit(measureIndex)&&measureIndex<score.measures.length-1){measureIndex++;tick=0;}
+  tick=Math.max(0,Math.min(measureLimit(measureIndex),tick));
   score.selection={measure:measureIndex,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:tick,rangeEnd:null};
   render();
 }
@@ -1397,7 +1472,7 @@ function deleteSelected() {
   const entry = selectedEntry(); if (!entry) return;
   remember();
   const ticks=durationTicks(entry.note),start=notePosition(entry.note,entry.measure,entry.voice);
-  Object.assign(entry.note,{rest:true,grace:false,startTick:start,ticks,measureRest:start===0&&Math.abs(ticks-measureLimit())<.001});
+  Object.assign(entry.note,{rest:true,grace:false,startTick:start,ticks,measureRest:start===0&&Math.abs(ticks-measureLimit(entry.measure))<.001});
   delete entry.note.pitches;delete entry.note.positions;delete entry.note.positionImported;delete entry.note.tabImported;delete entry.note.tuplet;delete entry.note.accidental;delete entry.note.accidentals;delete entry.note.diatonicMidis;
   score.annotations = score.annotations.filter((a) => a.start.noteId !== entry.note.id && a.end.noteId !== entry.note.id);
   render();
@@ -1415,6 +1490,38 @@ function insertMeasureAfterSelection() {
   render();
 }
 
+function selectedPickupTimeSignature() {
+  const [beats,beatType]=$('#pickupTimeSignature').value.split('/').map(Number);
+  return {beats,beatType};
+}
+
+// The first measure becomes a pickup with its own (shorter) time signature.
+// Its events are trimmed or padded with rests to fit that length.
+function setPickup(enabled, timeSignature=selectedPickupTimeSignature()) {
+  const measure=score.measures[0];
+  if(!measure)return;
+  const wasPickup=!!measure.pickup;
+  if(!enabled&&!wasPickup)return;
+  if(enabled&&wasPickup&&sameTimeSignature(measure.timeSignature,timeSignature))return;
+  const nextLimit=enabled?timeSignatureTicks(timeSignature):timeSignatureTicks(score.timeSignature);
+  const lost=measure.voices.flat().filter((note)=>!note.rest&&(Number(note.startTick)||0)>=nextLimit-.001);
+  if(lost.length&&!window.confirm(`픽업 마디 길이를 벗어나는 음표 ${lost.length}개가 삭제됩니다. 계속할까요?`))return;
+  remember();
+  measure.voices.forEach((voice,voiceIndex)=>materializeVoiceTicks(measure,voiceIndex));
+  const before=new Set(measure.voices.flat().map((note)=>note.id));
+  if(enabled){measure.pickup=true;measure.timeSignature={...timeSignature};}
+  else{delete measure.pickup;delete measure.timeSignature;}
+  measure.voices.forEach((voice,voiceIndex)=>{
+    if(!voice.length)return;
+    normalizeVoiceToMeasure(measure,voiceIndex);
+    rebuildVoiceRests(measure,voiceIndex);
+  });
+  const after=new Set(measure.voices.flat().map((note)=>note.id));
+  removeAnnotationsForNotes(new Set([...before].filter((id)=>!after.has(id))));
+  score.selection={measure:0,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:0,rangeEnd:null};
+  updateControls();render();
+}
+
 function escapeXml(value='') { return value.replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c])); }
 const STEP = ['C','C','D','D','E','F','F','G','G','A','A','B'];
 const ALTER = [0,1,0,1,0,0,1,0,1,0,1,0];
@@ -1427,15 +1534,18 @@ function toMusicXml() {
     if(annotation.end?.noteId){const list=annotationEnds.get(annotation.end.noteId)||[];list.push(annotation);annotationEnds.set(annotation.end.noteId,list);}
   });
   let exportedKey=Number(score.keyFifths)||0;
+  const timeXml=(mi)=>{const time=measureTimeSignature(mi);return `<time${score.timeSymbol==='common'&&!score.measures[mi].pickup?' symbol="common"':''}><beats>${time.beats}</beats><beat-type>${time.beatType}</beat-type></time>`;};
   const measures = score.measures.map((m, mi) => {
-    let body = `${mi > 0 && score.measures[mi-1].forceBreakAfter ? '<print new-system="yes"/>' : ''}${mi === 0 ? `<attributes><divisions>8</divisions><key><fifths>${score.keyFifths||0}</fifths></key><time${score.timeSymbol==='common'?' symbol="common"':''}><beats>${score.timeSignature.beats}</beats><beat-type>${score.timeSignature.beatType}</beat-type></time><staves>2</staves>${score.instrument==='piano'?'':'<transpose><diatonic>0</diatonic><chromatic>0</chromatic><octave-change>-1</octave-change></transpose>'}<clef number="1"><sign>G</sign><line>2</line></clef>${score.instrument==='piano'?'<clef number="2"><sign>F</sign><line>4</line></clef>':'<clef number="2"><sign>TAB</sign><line>5</line></clef><staff-details number="2"><staff-lines>6</staff-lines></staff-details>'}</attributes>${score.tempo?`<direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${score.tempo}</per-minute></metronome></direction-type><sound tempo="${score.tempo}"/></direction>`:''}` : ''}`;
-    if(mi>0&&Number.isFinite(m.keyFifths)&&m.keyFifths!==exportedKey){exportedKey=m.keyFifths;body+=`<attributes><key><fifths>${exportedKey}</fifths></key></attributes>`;}
+    let body = `${mi > 0 && score.measures[mi-1].forceBreakAfter ? '<print new-system="yes"/>' : ''}${mi === 0 ? `<attributes><divisions>8</divisions><key><fifths>${score.keyFifths||0}</fifths></key>${timeXml(0)}<staves>2</staves>${score.instrument==='piano'?'':'<transpose><diatonic>0</diatonic><chromatic>0</chromatic><octave-change>-1</octave-change></transpose>'}<clef number="1"><sign>G</sign><line>2</line></clef>${score.instrument==='piano'?'<clef number="2"><sign>F</sign><line>4</line></clef>':'<clef number="2"><sign>TAB</sign><line>5</line></clef><staff-details number="2"><staff-lines>6</staff-lines></staff-details>'}</attributes>${score.tempo?`<direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${score.tempo}</per-minute></metronome></direction-type><sound tempo="${score.tempo}"/></direction>`:''}` : ''}`;
+    const keyChanged=mi>0&&Number.isFinite(m.keyFifths)&&m.keyFifths!==exportedKey;
+    if(keyChanged)exportedKey=m.keyFifths;
+    if(keyChanged||(mi>0&&timeSignatureChangesAt(mi)))body+=`<attributes>${keyChanged?`<key><fifths>${exportedKey}</fifths></key>`:''}${mi>0&&timeSignatureChangesAt(mi)?timeXml(mi):''}</attributes>`;
     const endingStarts=score.annotations.filter((annotation)=>annotation.type==='ending'&&annotation.start?.measure===mi);
     endingStarts.forEach((annotation)=>{body+=`<barline location="left"><ending number="${annotation.number}" type="start"/></barline>`;});
     if(m.repeatStart)body+='<barline location="left"><repeat direction="forward"/></barline>';
     m.directions?.forEach((direction)=>{const justify=direction.align==='end'?'right':direction.align==='center'?'center':'left';body+=`<direction placement="${direction.placement||'above'}"><direction-type><words justify="${justify}">${escapeXml(direction.text)}</words></direction-type></direction>`;});
     m.voices.forEach((voice, vi) => {
-      if (vi && voice.length) body += `<backup><duration>${measureLimit()}</duration></backup>`;
+      if (vi && voice.length) body += `<backup><duration>${measureLimit(m)}</duration></backup>`;
       voice.forEach((n) => {
         const starts=annotationStarts.get(n.id)||[],ends=annotationEnds.get(n.id)||[];
         if(n.dynamic)body+=`<direction placement="below"><direction-type><dynamics><${n.dynamic}/></dynamics></direction-type></direction>`;
@@ -1457,7 +1567,7 @@ function toMusicXml() {
     if(m.repeatEnd)body+='<barline location="right"><repeat direction="backward"/></barline>';
     const endingEnds=score.annotations.filter((annotation)=>annotation.type==='ending'&&annotation.end?.measure===mi);
     endingEnds.forEach((annotation)=>{body+=`<barline location="right"><ending number="${annotation.number}" type="${annotation.closed?'stop':'discontinue'}"/></barline>`;});
-    return `<measure number="${mi+1}">${body}</measure>`;
+    return `<measure number="${displayMeasureNumber(mi)}"${m.pickup?' implicit="yes"':''}>${body}</measure>`;
   }).join('');
   return `<?xml version="1.0" encoding="UTF-8"?><score-partwise version="4.0"><work><work-title>${escapeXml(score.metadata.title)}</work-title></work><identification><creator type="composer">${escapeXml(score.metadata.composer)}</creator><creator type="lyricist">${escapeXml(score.metadata.lyricist)}</creator></identification><part-list><score-part id="P1"><part-name>${instrumentName}</part-name></score-part></part-list><part id="P1">${measures}</part></score-partwise>`;
 }
@@ -1654,6 +1764,32 @@ function automaticTabForScore(targetScore) {
   });
 }
 
+function ticksToTimeSignature(ticks, preferredBeatType) {
+  for(const beatType of [preferredBeatType,4,8,16]){
+    const beats=ticks*beatType/32;
+    if(beats>=1&&Math.abs(beats-Math.round(beats))<.001)return {beats:Math.round(beats),beatType};
+  }
+  return null;
+}
+
+// A short first measure becomes a pickup: either it declares its own time
+// signature (as this editor exports it) or it is marked implicit and simply
+// holds fewer beats than the score's time signature.
+function detectImportedPickup(target, times, implicit) {
+  const first=target.measures[0];
+  if(!first||target.measures.length<2||!times[0]||!times[1])return;
+  const main={beats:times[1].beats,beatType:times[1].beatType};
+  let pickupTime=null;
+  if(!sameTimeSignature(times[0],main))pickupTime={beats:times[0].beats,beatType:times[0].beatType};
+  else if(implicit){
+    const content=Math.max(0,...first.voices.flatMap((voice)=>voice.filter((note)=>!note.grace).map((note)=>(Number(note.startTick)||0)+durationTicks(note))));
+    if(content>0&&content<timeSignatureTicks(main)-.001)pickupTime=ticksToTimeSignature(content,main.beatType);
+  }
+  if(!pickupTime)return;
+  first.pickup=true;first.timeSignature=pickupTime;
+  target.timeSignature=main;target.timeSymbol=times[1].symbol||'';
+}
+
 function importMusicXml(text) {
   const doc = new DOMParser().parseFromString(text, 'application/xml');
   if (doc.querySelector('parsererror')) throw new Error('올바른 MusicXML 파일이 아닙니다.');
@@ -1674,8 +1810,15 @@ function importMusicXml(text) {
   const orphanTieStops=new Map();
   const openWedges=new Map();
   const openEndings=new Map();
+  const importedTimes=[];
+  let currentTime={...fresh.timeSignature,symbol:fresh.timeSymbol};
+  let firstMeasureImplicit=false;
   doc.querySelectorAll('part:first-of-type > measure').forEach((mx,measureIndex) => {
     const m = createMeasure();
+    if(measureIndex===0)firstMeasureImplicit=mx.getAttribute('implicit')==='yes';
+    const timeNode=mx.querySelector(':scope > attributes > time');
+    if(timeNode)currentTime={beats:Number(timeNode.querySelector('beats')?.textContent||currentTime.beats),beatType:Number(timeNode.querySelector('beat-type')?.textContent||currentTime.beatType),symbol:timeNode.getAttribute('symbol')||''};
+    importedTimes.push(currentTime);
     const changedKey=mx.querySelector(':scope > attributes > key > fifths');
     if(changedKey)m.keyFifths=Number(changedKey.textContent||0);
     m.directions=[...mx.querySelectorAll(':scope > direction words')].map((words)=>({text:words.textContent.trim(),placement:words.closest('direction')?.getAttribute('placement')||'above',align:words.getAttribute('justify')==='right'?'end':words.getAttribute('justify')==='center'?'center':'start'})).filter((item)=>item.text);
@@ -1811,6 +1954,7 @@ function importMusicXml(text) {
   });
   fresh.voiceCount=Math.max(1,...fresh.measures.flatMap((measure)=>measure.voices.map((voice,index)=>voice.length?index+1:0)));
   if (!fresh.measures.length) fresh.measures.push(createMeasure());
+  detectImportedPickup(fresh,importedTimes,firstMeasureImplicit);
   automaticTabForScore(fresh);
   remember(); score = fresh; syncMetadataInputs(); updateControls(); render();
 }
@@ -1860,7 +2004,7 @@ $('#voice').addEventListener('click', () => {
   const first=firstSelectableEvent(measureIndex,score.activeVoice,0,true,true);
   score.selection=first
     ?{measure:measureIndex,voice:score.activeVoice,noteId:first.note.id,source:first.note.rest?'staff':previousSource,cursorTick:first.tick,rangeEnd:null}
-    :{measure:measureIndex,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:Math.min(measureLimit(),cursorTick),rangeEnd:null};
+    :{measure:measureIndex,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:Math.min(measureLimit(measureIndex),cursorTick),rangeEnd:null};
   updateControls();render();
 });
 $('#addVoice').addEventListener('click',()=>{
@@ -1874,7 +2018,7 @@ function deleteActiveVoice(currentMeasureOnly=false){
   const voice=score.activeVoice;
   if(!currentMeasureOnly&&(score.voiceCount||1)<=1){status.textContent='마지막 성부는 삭제할 수 없습니다.';return;}
   const message=currentMeasureOnly
-    ? `${score.selection.measure+1}마디의 V${voice+1} 음표와 쉼표를 모두 삭제할까요?`
+    ? `${measureLabel(score.selection.measure)}의 V${voice+1} 음표와 쉼표를 모두 삭제할까요?`
     : `V${voice+1} 성부의 모든 음표와 쉼표가 악보 전체에서 사라집니다. 정말 계속할까요?`;
   if(!window.confirm(message))return;
   remember();
@@ -1930,6 +2074,8 @@ $('#textFont').addEventListener('change', (e) => { score.textFont=e.target.value
 $('#measuresPerSystem').addEventListener('change', (e) => { score.measuresPerSystem=Number(e.target.value);render(); });
 $('#systemSpacing').addEventListener('change', (e) => { score.systemSpacing=Number(e.target.value);render(); });
 $('#timeSignature').addEventListener('change', (e) => { const [beats,beatType]=e.target.value.split('/').map(Number);score.timeSignature={beats,beatType};render(); });
+$('#pickup').addEventListener('click',()=>setPickup(!score.measures[0]?.pickup));
+$('#pickupTimeSignature').addEventListener('change',()=>{if(score.measures[0]?.pickup)setPickup(true);});
 $('#keySignature').addEventListener('change', (e) => {score.keyFifths=Number(e.target.value);render();});
 $('#tempo').addEventListener('change', (e) => {score.tempo=Math.max(20,Math.min(300,Number(e.target.value)||120));e.target.value=score.tempo;render();});
 $('#addDirection').addEventListener('click', () => {const text=$('#directionText').value.trim();if(!text)return;const measure=score.measures[score.selection.measure];remember();measure.directions??=[];measure.directions.push({text,placement:$('#directionPlacement').value,align:$('#directionAlign').value});$('#directionText').value='';render();});
@@ -1971,10 +2117,11 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'Period' || e.code === 'NumpadDecimal') { e.preventDefault();$('#dot').click();return; }
   if (/^Digit\d$/.test(e.code) || /^Numpad\d$/.test(e.code)) {
     const digit=e.code.at(-1);
-    if(score.selection.source==='tab'&&selectedEntry()){
+    const selectedNote=selectedEntry()?.note;
+    if(score.selection.source==='tab'&&selectedNote&&!selectedNote.rest){
       e.preventDefault();changeFret(digit);return;
     }
-    if(digit==='0'&&selectedEntry()){
+    if(digit==='0'&&selectedNote&&!selectedNote.rest){
       e.preventDefault();applyAccidental(0);return;
     }
     const durationByDigit={1:32,2:16,3:8,4:4,5:2};

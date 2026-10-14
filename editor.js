@@ -195,7 +195,12 @@ function timeSignatureChangesAt(index) {
 
 function measureLimit(measureOrIndex=score.selection.measure) { return timeSignatureTicks(measureTimeSignature(measureOrIndex)); }
 
-function displayMeasureNumber(index) { return index+(score.measures[0]?.pickup?0:1); }
+// Pickup measures are not counted, so numbering continues across them.
+function displayMeasureNumber(index) {
+  let number=0;
+  for(let i=0;i<=index;i++)if(!score.measures[i]?.pickup)number++;
+  return number;
+}
 
 function measureLabel(index) { return score.measures[index]?.pickup?'픽업 마디':`${displayMeasureNumber(index)}마디`; }
 
@@ -1042,7 +1047,7 @@ function updateControls() {
   $('#toggleTab').classList.toggle('active', score.showTab!==false);
   $('#toggleTab').textContent=score.showTab===false?'타브 보이기':'타브 숨기기';
   $('#toggleTab').disabled=score.instrument==='piano';
-  const pickupMeasure=score.measures[0];
+  const pickupMeasure=score.measures[score.selection.measure];
   $('#pickup').classList.toggle('active',!!pickupMeasure?.pickup);
   if(pickupMeasure?.pickup){
     const value=`${pickupMeasure.timeSignature.beats}/${pickupMeasure.timeSignature.beatType}`;
@@ -1495,10 +1500,11 @@ function selectedPickupTimeSignature() {
   return {beats,beatType};
 }
 
-// The first measure becomes a pickup with its own (shorter) time signature.
-// Its events are trimmed or padded with rests to fit that length.
+// The selected measure becomes a pickup with its own (shorter) time
+// signature. Its events are trimmed or padded with rests to fit that length.
 function setPickup(enabled, timeSignature=selectedPickupTimeSignature()) {
-  const measure=score.measures[0];
+  const measureIndex=score.selection.measure;
+  const measure=score.measures[measureIndex];
   if(!measure)return;
   const wasPickup=!!measure.pickup;
   if(!enabled&&!wasPickup)return;
@@ -1518,7 +1524,7 @@ function setPickup(enabled, timeSignature=selectedPickupTimeSignature()) {
   });
   const after=new Set(measure.voices.flat().map((note)=>note.id));
   removeAnnotationsForNotes(new Set([...before].filter((id)=>!after.has(id))));
-  score.selection={measure:0,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:0,rangeEnd:null};
+  score.selection={measure:measureIndex,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:0,rangeEnd:null};
   updateControls();render();
 }
 
@@ -1567,7 +1573,8 @@ function toMusicXml() {
     if(m.repeatEnd)body+='<barline location="right"><repeat direction="backward"/></barline>';
     const endingEnds=score.annotations.filter((annotation)=>annotation.type==='ending'&&annotation.end?.measure===mi);
     endingEnds.forEach((annotation)=>{body+=`<barline location="right"><ending number="${annotation.number}" type="${annotation.closed?'stop':'discontinue'}"/></barline>`;});
-    return `<measure number="${displayMeasureNumber(mi)}"${m.pickup?' implicit="yes"':''}>${body}</measure>`;
+    const measureNumber=!m.pickup?displayMeasureNumber(mi):mi===0?0:`X${mi+1}`;
+    return `<measure number="${measureNumber}"${m.pickup?' implicit="yes"':''}>${body}</measure>`;
   }).join('');
   return `<?xml version="1.0" encoding="UTF-8"?><score-partwise version="4.0"><work><work-title>${escapeXml(score.metadata.title)}</work-title></work><identification><creator type="composer">${escapeXml(score.metadata.composer)}</creator><creator type="lyricist">${escapeXml(score.metadata.lyricist)}</creator></identification><part-list><score-part id="P1"><part-name>${instrumentName}</part-name></score-part></part-list><part id="P1">${measures}</part></score-partwise>`;
 }
@@ -1772,22 +1779,28 @@ function ticksToTimeSignature(ticks, preferredBeatType) {
   return null;
 }
 
-// A short first measure becomes a pickup: either it declares its own time
-// signature (as this editor exports it) or it is marked implicit and simply
-// holds fewer beats than the score's time signature.
-function detectImportedPickup(target, times, implicit) {
-  const first=target.measures[0];
-  if(!first||target.measures.length<2||!times[0]||!times[1])return;
-  const main={beats:times[1].beats,beatType:times[1].beatType};
-  let pickupTime=null;
-  if(!sameTimeSignature(times[0],main))pickupTime={beats:times[0].beats,beatType:times[0].beatType};
-  else if(implicit){
-    const content=Math.max(0,...first.voices.flatMap((voice)=>voice.filter((note)=>!note.grace).map((note)=>(Number(note.startTick)||0)+durationTicks(note))));
-    if(content>0&&content<timeSignatureTicks(main)-.001)pickupTime=ticksToTimeSignature(content,main.beatType);
-  }
-  if(!pickupTime)return;
-  first.pickup=true;first.timeSignature=pickupTime;
-  target.timeSignature=main;target.timeSymbol=times[1].symbol||'';
+// Implicit (uncounted) measures become pickups: either they declare their own
+// time signature (as this editor exports them) or they simply hold fewer
+// beats than the score's time signature. A first measure whose time signature
+// differs from the second one is also treated as a pickup.
+function detectImportedPickups(target, times, implicitFlags) {
+  if(!target.measures.length||!times[0])return;
+  const firstDiffers=target.measures.length>1&&times[1]&&!sameTimeSignature(times[0],times[1]);
+  const isPickup=(index)=>implicitFlags[index]||(index===0&&firstDiffers);
+  const mainIndex=target.measures.findIndex((measure,index)=>!isPickup(index));
+  if(mainIndex<0)return;
+  const main={beats:times[mainIndex].beats,beatType:times[mainIndex].beatType};
+  target.measures.forEach((measure,index)=>{
+    if(!isPickup(index)||!times[index])return;
+    let pickupTime=null;
+    if(!sameTimeSignature(times[index],main))pickupTime={beats:times[index].beats,beatType:times[index].beatType};
+    else{
+      const content=Math.max(0,...measure.voices.flatMap((voice)=>voice.filter((note)=>!note.grace).map((note)=>(Number(note.startTick)||0)+durationTicks(note))));
+      if(content>0&&content<timeSignatureTicks(main)-.001)pickupTime=ticksToTimeSignature(content,main.beatType);
+    }
+    if(pickupTime){measure.pickup=true;measure.timeSignature=pickupTime;}
+  });
+  target.timeSignature=main;target.timeSymbol=times[mainIndex].symbol||'';
 }
 
 function importMusicXml(text) {
@@ -1812,10 +1825,10 @@ function importMusicXml(text) {
   const openEndings=new Map();
   const importedTimes=[];
   let currentTime={...fresh.timeSignature,symbol:fresh.timeSymbol};
-  let firstMeasureImplicit=false;
+  const implicitFlags=[];
   doc.querySelectorAll('part:first-of-type > measure').forEach((mx,measureIndex) => {
     const m = createMeasure();
-    if(measureIndex===0)firstMeasureImplicit=mx.getAttribute('implicit')==='yes';
+    implicitFlags.push(mx.getAttribute('implicit')==='yes');
     const timeNode=mx.querySelector(':scope > attributes > time');
     if(timeNode)currentTime={beats:Number(timeNode.querySelector('beats')?.textContent||currentTime.beats),beatType:Number(timeNode.querySelector('beat-type')?.textContent||currentTime.beatType),symbol:timeNode.getAttribute('symbol')||''};
     importedTimes.push(currentTime);
@@ -1954,7 +1967,7 @@ function importMusicXml(text) {
   });
   fresh.voiceCount=Math.max(1,...fresh.measures.flatMap((measure)=>measure.voices.map((voice,index)=>voice.length?index+1:0)));
   if (!fresh.measures.length) fresh.measures.push(createMeasure());
-  detectImportedPickup(fresh,importedTimes,firstMeasureImplicit);
+  detectImportedPickups(fresh,importedTimes,implicitFlags);
   automaticTabForScore(fresh);
   remember(); score = fresh; syncMetadataInputs(); updateControls(); render();
 }
@@ -2074,8 +2087,8 @@ $('#textFont').addEventListener('change', (e) => { score.textFont=e.target.value
 $('#measuresPerSystem').addEventListener('change', (e) => { score.measuresPerSystem=Number(e.target.value);render(); });
 $('#systemSpacing').addEventListener('change', (e) => { score.systemSpacing=Number(e.target.value);render(); });
 $('#timeSignature').addEventListener('change', (e) => { const [beats,beatType]=e.target.value.split('/').map(Number);score.timeSignature={beats,beatType};render(); });
-$('#pickup').addEventListener('click',()=>setPickup(!score.measures[0]?.pickup));
-$('#pickupTimeSignature').addEventListener('change',()=>{if(score.measures[0]?.pickup)setPickup(true);});
+$('#pickup').addEventListener('click',()=>setPickup(!score.measures[score.selection.measure]?.pickup));
+$('#pickupTimeSignature').addEventListener('change',()=>{if(score.measures[score.selection.measure]?.pickup)setPickup(true);});
 $('#keySignature').addEventListener('change', (e) => {score.keyFifths=Number(e.target.value);render();});
 $('#tempo').addEventListener('change', (e) => {score.tempo=Math.max(20,Math.min(300,Number(e.target.value)||120));e.target.value=score.tempo;render();});
 $('#addDirection').addEventListener('click', () => {const text=$('#directionText').value.trim();if(!text)return;const measure=score.measures[score.selection.measure];remember();measure.directions??=[];measure.directions.push({text,placement:$('#directionPlacement').value,align:$('#directionAlign').value});$('#directionText').value='';render();});

@@ -35,8 +35,13 @@ let selectedAnnotation = -1;
 let hairpinDrag = null;
 let lastTieShortcutAt = 0;
 let measureClipboard = null;
+let lyricTarget = null;
+let renderedLyricY = new Map();
 let autosaveTimer = null;
 const AUTOSAVE_KEY = 'guitar-score-app:score';
+const LIBRARY_KEY = 'guitar-score-app:library';
+const SONG_KEY_PREFIX = 'guitar-score-app:song:';
+let currentSongId = null;
 
 // Keyboard letters enter the lower guitar octave by default: C3–B3.
 const PITCH_BY_CODE = { KeyA: 57, KeyB: 59, KeyC: 48, KeyD: 50, KeyE: 52, KeyF: 53, KeyG: 55 };
@@ -557,6 +562,11 @@ function endpointFor(ref) {
   return renderedNotes.get(ref.noteId) || null;
 }
 
+const ARTICULATIONS = {
+  staccato:{code:'a.',label:'스타카토'}, accent:{code:'a>',label:'악센트'},
+  tenuto:{code:'a-',label:'테누토'}, 'strong-accent':{code:'a^',label:'마르카토'},
+};
+
 const VEX_DURATION = { 32:'w', 16:'h', 8:'q', 4:'8', 2:'16', 1:'32' };
 const VEX_NAMES = ['c','c#','d','d#','e','f','f#','g','g#','a','a#','b'];
 const KEY_BY_FIFTHS = ['Cb','Gb','Db','Ab','Eb','Bb','F','C','G','D','A','E','B','F#','C#'];
@@ -767,6 +777,160 @@ function drawAnnotations(layouts) {
   });
 }
 
+function scoreHasLyrics() {
+  return score.measures.some((measure)=>measure.voices.some((voice)=>voice.some((note)=>note.lyric?.text)));
+}
+
+// Lyrics sit on one line under each system's staff. A syllable marked with a
+// hyphen is joined to the next syllable of its voice by centred dashes.
+function drawLyrics(layouts) {
+  const systemsBounds=new Map();
+  for(const layout of layouts.values()){
+    const bound=systemsBounds.get(layout.system)||{left:layout.x,right:layout.x+layout.width,staffBottom:layout.staffBottom};
+    bound.left=Math.min(bound.left,layout.x);bound.right=Math.max(bound.right,layout.x+layout.width);
+    systemsBounds.set(layout.system,bound);
+  }
+  // Keep the lyric line below low noteheads and below articulations placed
+  // under up-stem notes.
+  const lowest=new Map();
+  selectionOrder().forEach(({note,voice})=>{
+    const item=renderedNotes.get(note.id);
+    if(!item)return;
+    const bound=systemsBounds.get(item.system);
+    const articulationRoom=voice%2===0?(note.articulations?.length||0)*13:0;
+    const bottom=Math.max(item.noteY+18,(bound?.staffBottom??item.noteY)+24)+articulationRoom;
+    lowest.set(item.system,Math.max(lowest.get(item.system)??-Infinity,bottom));
+  });
+  systemsBounds.forEach((bound,system)=>renderedLyricY.set(system,Math.max(bound.staffBottom+24,lowest.get(system)??-Infinity)));
+  const font=score.textFont||'Georgia, serif';
+  const drawn=[];
+  selectionOrder().forEach(({note,measure,voice})=>{
+    const rendered=renderedNotes.get(note.id);
+    if(!rendered||note.rest||!note.lyric?.text)return;
+    const y=renderedLyricY.get(rendered.system);
+    const text=svg('text',{x:rendered.x,y,text:note.lyric.text,class:'lyric','text-anchor':'middle','font-size':14,'font-family':font,fill:'#111'});
+    text.addEventListener('click',(event)=>{event.stopPropagation();openLyricEditor({measure,voice,noteId:note.id});});
+    const width=text.getComputedTextLength?.()||note.lyric.text.length*8;
+    drawn.push({note,voice,rendered,y,left:rendered.x-width/2,right:rendered.x+width/2});
+  });
+  const dash=(x,y)=>svg('text',{x,y,text:'-',class:'lyric-hyphen','text-anchor':'middle','font-size':14,'font-family':font,fill:'#111'});
+  const dashes=(x1,x2,y)=>{
+    const gap=x2-x1;if(gap<4)return;
+    const count=Math.max(1,Math.floor(gap/70));
+    for(let index=1;index<=count;index++)dash(x1+gap*index/(count+1),y);
+  };
+  drawn.forEach((item,index)=>{
+    if(!item.note.lyric.hyphen)return;
+    const next=drawn.slice(index+1).find((candidate)=>candidate.voice===item.voice);
+    if(!next){dash(item.right+8,item.y);return;}
+    if(next.rendered.system===item.rendered.system){dashes(item.right,next.left,item.y);return;}
+    dashes(item.right,systemsBounds.get(item.rendered.system).right,item.y);
+    const nextBound=systemsBounds.get(next.rendered.system);
+    dashes(nextBound.left+40,next.left,next.y);
+  });
+}
+
+function lyricNoteAfter(ref, direction=1) {
+  const ordered=selectionOrder().filter((entry)=>entry.voice===ref.voice&&!entry.note.rest&&!entry.note.grace);
+  const index=ordered.findIndex((entry)=>entry.note.id===ref.noteId);
+  const next=index<0?null:ordered[index+direction];
+  return next?{measure:next.measure,voice:next.voice,noteId:next.note.id}:null;
+}
+
+function startLyrics() {
+  let entry=selectedEntry();
+  if(!entry||entry.note.rest||entry.note.grace){
+    const s=score.selection;
+    const pitched=selectionOrder().filter((item)=>item.voice===score.activeVoice&&!item.note.rest&&!item.note.grace);
+    const fromTick=entry?notePosition(entry.note,entry.measure,entry.voice):(s.cursorTick??0);
+    // Prefer the next note after the caret, else the first note of the measure.
+    const candidate=pitched.find((item)=>item.measure>s.measure||(item.measure===s.measure&&item.tick>=fromTick-.001))
+      ||pitched.find((item)=>item.measure===s.measure);
+    if(!candidate){status.textContent='가사를 붙일 음표를 먼저 선택하세요.';return;}
+    entry={measureIndex:candidate.measure,voice:candidate.voice,note:candidate.note};
+  }
+  openLyricEditor({measure:entry.measureIndex,voice:entry.voice,noteId:entry.note.id});
+}
+
+function lyricNote(ref) {
+  return score.measures[ref.measure]?.voices[ref.voice]?.find((note)=>note.id===ref.noteId)||null;
+}
+
+function openLyricEditor(ref) {
+  const note=lyricNote(ref);
+  if(!note){closeLyricEditor();return;}
+  lyricTarget=ref;
+  score.selection={measure:ref.measure,voice:ref.voice,noteId:ref.noteId,source:'staff',cursorTick:notePosition(note,score.measures[ref.measure],ref.voice),rangeEnd:null};
+  score.activeVoice=ref.voice;
+  updateControls();render();
+  const input=$('#lyricInput'),rendered=renderedNotes.get(ref.noteId),matrix=notationSvg?.getScreenCTM?.();
+  if(!rendered||!matrix){closeLyricEditor();return;}
+  const lyricY=renderedLyricY.get(rendered.system)??rendered.noteY+40;
+  const point=new DOMPoint(rendered.x,lyricY-5).matrixTransform(matrix),sheetRect=sheet.getBoundingClientRect();
+  input.hidden=false;
+  input.style.left=`${point.x-sheetRect.left}px`;input.style.top=`${point.y-sheetRect.top}px`;
+  input.value=note.lyric?.text||'';
+  input.focus({preventScroll:false});input.select();
+  status.textContent='가사 입력: Space 다음 음표 · - 다음 음절과 하이픈 연결 · Backspace(빈 칸) 이전 음표 · Enter/Esc 끝내기';
+}
+
+function closeLyricEditor() {
+  lyricTarget=null;
+  const input=$('#lyricInput');
+  if(!input.hidden){input.hidden=true;input.value='';}
+  scoreSvg.focus?.({preventScroll:true});
+}
+
+function commitLyric(text, hyphen) {
+  if(!lyricTarget)return;
+  const note=lyricNote(lyricTarget);
+  if(!note)return;
+  const cleaned=text.trim();
+  const current=note.lyric;
+  if((current?.text||'')===cleaned&&(!cleaned||!!current?.hyphen===hyphen))return;
+  remember();
+  if(cleaned)note.lyric={text:cleaned,hyphen};else delete note.lyric;
+}
+
+function advanceLyric(direction=1) {
+  const next=lyricTarget&&lyricNoteAfter(lyricTarget,direction);
+  if(next)openLyricEditor(next);
+  else{closeLyricEditor();render();status.textContent='가사를 붙일 음표가 더 없습니다.';}
+}
+
+function handleLyricInput(event) {
+  if(event.isComposing||!lyricTarget)return;
+  const value=event.target.value;
+  if(value.endsWith(' ')){commitLyric(value,false);advanceLyric(1);return;}
+  if(value.endsWith('-')){
+    const text=value.slice(0,-1);
+    if(text.trim())commitLyric(text,true);
+    advanceLyric(1);
+  }
+}
+
+const lyricInput=$('#lyricInput');
+lyricInput.addEventListener('input',handleLyricInput);
+lyricInput.addEventListener('compositionend',(event)=>setTimeout(()=>handleLyricInput({isComposing:false,target:event.target}),0));
+lyricInput.addEventListener('keydown',(event)=>{
+  if(event.isComposing||!lyricTarget)return;
+  if(event.key==='Enter'){
+    event.preventDefault();
+    const note=lyricNote(lyricTarget);
+    commitLyric(lyricInput.value,!!note?.lyric?.hyphen&&note.lyric.text===lyricInput.value.trim());
+    closeLyricEditor();render();
+  }else if(event.key==='Escape'){event.preventDefault();closeLyricEditor();render();}
+  else if(event.key==='Backspace'&&!lyricInput.value){event.preventDefault();advanceLyric(-1);}
+  else if(event.key==='Tab'){event.preventDefault();commitLyric(lyricInput.value,!!lyricNote(lyricTarget)?.lyric?.hyphen);advanceLyric(event.shiftKey?-1:1);}
+});
+lyricInput.addEventListener('blur',()=>{
+  setTimeout(()=>{
+    if(!lyricTarget||document.activeElement===lyricInput)return;
+    commitLyric(lyricInput.value,!!lyricNote(lyricTarget)?.lyric?.hyphen);
+    closeLyricEditor();render();
+  },0);
+});
+
 // Estimate how much horizontal room a measure needs before VexFlow performs
 // its detailed collision-aware formatting. Systems keep the requested number
 // of measures, but dense measures receive more of the available width than a
@@ -795,19 +959,114 @@ function scheduleAutosave() {
   autosaveTimer=setTimeout(saveToBrowser,300);
 }
 
-// The score survives reloads and back/forward navigation in this browser.
+// Every song lives in this browser's storage: a small library index plus one
+// entry per song. The current song survives reloads and back navigation.
+function readLibrary() {
+  try{
+    const library=JSON.parse(localStorage.getItem(LIBRARY_KEY)||'null');
+    if(library&&Array.isArray(library.songs))return library;
+  }catch{}
+  return {currentId:null,songs:[]};
+}
+
+function writeLibrary(library) {
+  try{localStorage.setItem(LIBRARY_KEY,JSON.stringify(library));}catch{}
+}
+
+function songTitle(target=score) { return target.metadata?.title?.trim()||'제목 없음'; }
+
 function saveToBrowser() {
   clearTimeout(autosaveTimer);
-  try{localStorage.setItem(AUTOSAVE_KEY,JSON.stringify(score));}catch{}
+  if(!currentSongId)currentSongId=uid('song');
+  try{
+    localStorage.setItem(SONG_KEY_PREFIX+currentSongId,JSON.stringify(score));
+    const library=readLibrary();
+    const entry={id:currentSongId,title:songTitle(),updatedAt:Date.now()};
+    const index=library.songs.findIndex((song)=>song.id===currentSongId);
+    if(index<0)library.songs.push(entry);else library.songs[index]=entry;
+    library.currentId=currentSongId;
+    writeLibrary(library);
+  }catch{
+    status.textContent='브라우저 저장 공간이 부족해 자동 저장하지 못했습니다. XML ↓로 파일을 보관하세요.';
+  }
+}
+
+function normalizedSavedScore(saved) {
+  if(!saved||!Array.isArray(saved.measures)||!saved.measures.length)return null;
+  const base=createScore();
+  return {...base,...saved,metadata:{...base.metadata,...saved.metadata},selection:{...base.selection,...saved.selection}};
+}
+
+function loadSong(id) {
+  try{return normalizedSavedScore(JSON.parse(localStorage.getItem(SONG_KEY_PREFIX+id)||'null'));}catch{return null;}
 }
 
 function restoreFromBrowser() {
+  const library=readLibrary();
+  const restored=library.currentId&&loadSong(library.currentId);
+  if(restored){score=restored;currentSongId=library.currentId;return;}
+  // Scores saved before the library existed become its first song.
   try{
-    const saved=JSON.parse(localStorage.getItem(AUTOSAVE_KEY)||'null');
-    if(!saved||!Array.isArray(saved.measures)||!saved.measures.length)return;
-    const base=createScore();
-    score={...base,...saved,metadata:{...base.metadata,...saved.metadata},selection:{...base.selection,...saved.selection}};
+    const legacy=normalizedSavedScore(JSON.parse(localStorage.getItem(AUTOSAVE_KEY)||'null'));
+    if(legacy){score=legacy;currentSongId=uid('song');saveToBrowser();localStorage.removeItem(AUTOSAVE_KEY);}
   }catch{}
+}
+
+function switchToScore(nextScore, id) {
+  saveToBrowser();
+  score=nextScore;currentSongId=id;undoStack=[];measureWarning=null;selectedAnnotation=-1;
+  syncMetadataInputs();updateControls();render();saveToBrowser();
+  scoreSvg.focus?.({preventScroll:true});
+}
+
+function newScore() {
+  if(!window.confirm('새 악보를 만들까요? 지금 곡은 곡 목록에 저장됩니다.'))return;
+  const fresh=createScore();
+  fresh.instrument=score.instrument;fresh.page=score.page;
+  switchToScore(fresh,uid('song'));
+  status.textContent='새 악보를 만들었습니다. 빈 마디를 클릭한 뒤 A–G로 음표를 입력하세요.';
+}
+
+function openSongList() {
+  saveToBrowser();
+  const list=$('#songList');list.replaceChildren();
+  const songs=readLibrary().songs.sort((a,b)=>b.updatedAt-a.updatedAt);
+  songs.forEach((song)=>{
+    const row=document.createElement('li');
+    const name=document.createElement('button');
+    name.className='song-open';name.textContent=song.title;
+    if(song.id===currentSongId)name.classList.add('current');
+    const date=document.createElement('span');
+    date.className='song-date';date.textContent=new Date(song.updatedAt).toLocaleString('ko-KR',{dateStyle:'short',timeStyle:'short'});
+    const remove=document.createElement('button');
+    remove.className='song-delete';remove.textContent='삭제';remove.title=`${song.title} 삭제`;
+    name.addEventListener('click',()=>{
+      if(song.id!==currentSongId){
+        const loaded=loadSong(song.id);
+        if(!loaded){alert('이 곡을 불러올 수 없습니다.');return;}
+        switchToScore(loaded,song.id);
+      }
+      $('#songsDialog').close();
+    });
+    remove.addEventListener('click',()=>deleteSong(song.id,song.title));
+    row.append(name,date,remove);list.appendChild(row);
+  });
+  $('#songsDialog').showModal();
+}
+
+function deleteSong(id, title) {
+  if(!window.confirm(`'${title}'을(를) 곡 목록에서 삭제할까요? 되돌릴 수 없습니다.`))return;
+  const library=readLibrary();
+  library.songs=library.songs.filter((song)=>song.id!==id);
+  try{localStorage.removeItem(SONG_KEY_PREFIX+id);}catch{}
+  if(id===currentSongId){
+    const next=library.songs.sort((a,b)=>b.updatedAt-a.updatedAt)[0];
+    const nextScore=next&&loadSong(next.id);
+    currentSongId=null;writeLibrary(library);
+    score=nextScore||createScore();currentSongId=nextScore?next.id:uid('song');undoStack=[];
+    syncMetadataInputs();updateControls();render();saveToBrowser();
+  }else writeLibrary(library);
+  openSongList();
 }
 
 function render() {
@@ -817,6 +1076,7 @@ function render() {
   notationSvg=null;
   renderedNotes=new Map();
   renderedSystemBreaks=[];
+  renderedLyricY=new Map();
   $('#printTitle').textContent = score.metadata.title;
   $('#printLyricist').textContent = score.metadata.lyricist || '';
   $('#printComposer').textContent = score.metadata.composer || '';
@@ -828,7 +1088,9 @@ function render() {
   const sys = systems();
   const showLowerStaff=score.instrument==='piano'||score.showTab!==false;
   const requestedSpacing=Math.max(225, Math.min(320, Number(score.systemSpacing) || 245));
-  const systemHeight = showLowerStaff?requestedSpacing*densityScale:Math.max(120,requestedSpacing*.54)*Math.min(densityScale,1.25), top = 5*densityScale;
+  // Lyrics get their own band between the staff and the TAB/bass staff.
+  const lyricSpace=scoreHasLyrics()?26*densityScale:0;
+  const systemHeight = (showLowerStaff?requestedSpacing*densityScale:Math.max(120,requestedSpacing*.54)*Math.min(densityScale,1.25))+lyricSpace, top = 5*densityScale;
   const logicalHeight=Math.max(220*densityScale,top+sys.length*systemHeight);
   if(!VF){status.textContent='악보 렌더링 라이브러리를 불러오지 못했습니다.';return;}
   const context=new VF.SVGContext(scoreSvg).resize(width,logicalHeight);
@@ -860,7 +1122,8 @@ function render() {
       const measureWidth=measureWidths[localIndex];
       const x=runningX;runningX+=measureWidth;
       const staff=new VF.Stave(x,y,measureWidth);
-      const lower=showLowerStaff?(piano?new VF.Stave(x,y+122*densityScale,measureWidth):new VF.TabStave(x,y+122*densityScale,measureWidth)):null;
+      const lowerY=y+122*densityScale+lyricSpace;
+      const lower=showLowerStaff?(piano?new VF.Stave(x,lowerY,measureWidth):new VF.TabStave(x,lowerY,measureWidth)):null;
       const keyChanged=Number.isFinite(measure.keyFifths)&&measure.keyFifths!==currentKeyFifths;
       if(Number.isFinite(measure.keyFifths))currentKeyFifths=measure.keyFifths;
       if(localIndex===0){
@@ -880,7 +1143,7 @@ function render() {
       staff.setContext(context).draw();lower?.setContext(context).draw();
       const staffTop=staff.getYForLine(0),staffBottom=staff.getYForLine(4);
       const lowerTop=lower?.getYForLine(0)??staffTop,lowerBottom=lower?.getYForLine(piano?4:5)??staffBottom;
-      layouts.set(index,{x,width:measureWidth,staffY:staffTop,tabY:lowerTop,lowerBottom,noteStart:staff.getNoteStartX(),noteEnd:staff.getNoteEndX(),system:systemIndex});
+      layouts.set(index,{x,width:measureWidth,staffY:staffTop,staffBottom,tabY:lowerTop,lowerBottom,noteStart:staff.getNoteStartX(),noteEnd:staff.getNoteEndX(),system:systemIndex});
       const staffVoices=[],tabVoices=[],staffById=new Map(),tabById=new Map(),staffBeams=[],tabBeams=[],staffTuplets=[],tabTuplets=[];
       const displayedAccidentals=displayedAccidentalsForMeasure(measure,currentKeyFifths);
       measure.voices.forEach((modelVoice,voiceIndex)=>{
@@ -924,6 +1187,11 @@ function render() {
           });
           const dotCount=Number.isFinite(note.dots)?note.dots:(note.dotted?1:0);
           for(let dotIndex=0;dotIndex<dotCount;dotIndex++)VF.Dot.buildAndAttach([staveNote],{all:true});
+          if(!note.rest)(note.articulations||[]).forEach((name)=>{
+            if(!ARTICULATIONS[name])return;
+            // Articulations sit on the notehead side, opposite the stem.
+            staveNote.addModifier(new VF.Articulation(ARTICULATIONS[name].code).setPosition(direction===VF.Stem.UP?VF.Modifier.Position.BELOW:VF.Modifier.Position.ABOVE));
+          });
           if(note.fermata)staveNote.addModifier(new VF.Articulation('a@a').setPosition(note.fermata==='below'?VF.Modifier.Position.BELOW:VF.Modifier.Position.ABOVE));
           staveNote.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
           staffNotes.push(staveNote);staffById.set(note.id,staveNote);
@@ -1066,6 +1334,7 @@ function render() {
     if(score.instrument!=='piano'&&score.showTab!==false&&!note.rest){const th=svg('rect',{x:p.tabX-14,y:p.tabNoteY-11,width:28,height:22,class:'hit','data-note-id':note.id,'data-measure':measure,'data-voice':voice,'data-source':'tab'});th.addEventListener('pointerdown',(e)=>beginRangeSelection(e,measure,voice,note.id,'tab'));th.addEventListener('pointerenter',()=>extendRangeSelection(measure,voice,note.id));th.addEventListener('click',(e)=>{e.stopPropagation();if(ignoreNextClick){ignoreNextClick=false;return;}setSelection(measure,voice,note.id,e.shiftKey,'tab');});}
   });
   drawAnnotations(layouts);
+  drawLyrics(layouts);
   const entry = selectedEntry();
   status.textContent = entry
     ? `성부 ${entry.voice+1}(${VOICE_COLORS[entry.voice]}) · ${measureLabel(entry.measureIndex)} · ${entry.note.string}번 줄 ${entry.note.fret}프렛 · MIDI ${entry.note.midi}`
@@ -1285,6 +1554,19 @@ function selectedEntries(minimum=1) {
 function toggleRepeat(which) {
   const measure=score.measures[score.selection.measure];if(!measure)return;
   remember();measure[which]=!measure[which];render();
+}
+
+function toggleArticulation(name) {
+  const entries=selectedEntries().filter(({note})=>!note.rest);
+  if(!entries.length){status.textContent=`${ARTICULATIONS[name].label}를 붙일 음표를 먼저 선택하세요.`;return;}
+  const remove=entries.every(({note})=>note.articulations?.includes(name));
+  remember();
+  entries.forEach(({note})=>{
+    const current=(note.articulations||[]).filter((item)=>item!==name);
+    if(!remove)current.push(name);
+    if(current.length)note.articulations=current;else delete note.articulations;
+  });
+  render();
 }
 
 function toggleTuplet() {
@@ -1516,12 +1798,88 @@ function toggleEnharmonic(){
   render();
 }
 
+const NATURAL_SEMITONES = [0,2,4,5,7,9,11];
+
+function midiFromDiatonic(index) {
+  const octave=Math.floor(index/7),step=((index%7)+7)%7;
+  return (octave+1)*12+NATURAL_SEMITONES[step];
+}
+
+function normalizedFifths(fifths, preferFlat) {
+  let value=((fifths%12)+12)%12;
+  if(value>6)value-=12;
+  if(Math.abs(value)===6)value=preferFlat?-6:6;
+  return value;
+}
+
+function tonicLetterIndex(fifths) {
+  return 'CDEFGAB'.indexOf(KEY_BY_FIFTHS[Math.max(0,Math.min(14,fifths+7))][0]);
+}
+
+// Transposes the whole score, its key signatures and its spelling. Letter
+// names move by the interval between the old and new keys, so e.g. B♭ major
+// up a major second becomes C major with every note respelled to match.
+function transposeScore(semitones) {
+  if(!semitones)return;
+  const [low,high]=score.instrument==='piano'?[21,108]:[TUNING.at(-1),TUNING[0]+30];
+  const sounding=score.measures.flatMap((measure)=>measure.voices.flat()).filter((note)=>!note.rest)
+    .flatMap((note)=>note.pitches?.length?note.pitches:[note.midi]);
+  const outside=sounding.filter((midi)=>midi+semitones<low||midi+semitones>high).length;
+  if(outside){
+    alert(`${score.instrument==='piano'?'피아노':'기타'} 음역을 벗어나는 음이 ${outside}개 있어 이조할 수 없습니다. 다른 음정(예: 반대 방향)을 선택하세요.`);
+    return;
+  }
+  remember();
+  const oldFifths=Number(score.keyFifths)||0;
+  const preferFlat=semitones<0?oldFifths<=0:oldFifths<0;
+  const newFifths=normalizedFifths(oldFifths+7*semitones,preferFlat);
+  const letterShift=(tonicLetterIndex(newFifths)-tonicLetterIndex(oldFifths)+7)%7;
+  const steps=semitones>0?(letterShift===0&&semitones>=12?7:letterShift):(letterShift===0?(semitones<=-12?-7:0):letterShift-7);
+  const respell=(note,keyIndex,midi)=>{
+    const explicit=note.accidentals?.[keyIndex]??(keyIndex===0?note.accidental:null);
+    const natural=naturalMidiForKey(note,keyIndex,midi,explicit);
+    const nextMidi=midi+semitones;
+    let nextNatural=midiFromDiatonic(diatonicIndex(natural)+steps);
+    if(Math.abs(nextMidi-nextNatural)>2)nextNatural=SHARP_PITCH_CLASSES.has(((nextMidi%12)+12)%12)?nextMidi-1:nextMidi;
+    return {nextMidi,nextNatural};
+  };
+  score.measures.forEach((measure)=>{
+    if(Number.isFinite(measure.keyFifths))measure.keyFifths=normalizedFifths(measure.keyFifths+7*semitones,preferFlat);
+    measure.voices.flat().forEach((note)=>{
+      if(note.rest)return;
+      if(note.pitches?.length){
+        const results=note.pitches.map((midi,keyIndex)=>respell(note,keyIndex,midi));
+        note.pitches=results.map(({nextMidi})=>nextMidi);
+        note.diatonicMidis=results.map(({nextNatural})=>nextNatural);
+        note.accidentals=results.map(()=>null);
+        note.midi=note.pitches[0];note.diatonicMidi=note.diatonicMidis[0];note.accidental=null;
+      }else{
+        const {nextMidi,nextNatural}=respell(note,0,note.midi);
+        Object.assign(note,{midi:nextMidi,diatonicMidi:nextNatural,accidental:null});
+        delete note.diatonicMidis;delete note.accidentals;
+      }
+      delete note.tabImported;delete note.positionImported;
+    });
+  });
+  score.keyFifths=newFifths;
+  if(score.instrument!=='piano'){
+    score.measures.forEach((measure)=>measure.voices.flat().forEach((note)=>{
+      if(note.rest||note.pitches?.length)return;
+      const position=positionsForMidi(note.midi).sort((a,b)=>a.fret-b.fret)[0];
+      if(position)Object.assign(note,{string:position.string,fret:position.fret});
+    }));
+    automaticTabForScore(score);
+  }
+  syncMetadataInputs();updateControls();render();
+  status.textContent=`${semitones>0?'위로':'아래로'} ${Math.abs(semitones)}반음 이조했습니다. Ctrl+Z(⌘Z)로 되돌릴 수 있습니다.`;
+}
+
 function deleteSelected() {
   const entry = selectedEntry(); if (!entry) return;
   remember();
   const ticks=durationTicks(entry.note),start=notePosition(entry.note,entry.measure,entry.voice);
   Object.assign(entry.note,{rest:true,grace:false,startTick:start,ticks,measureRest:start===0&&Math.abs(ticks-measureLimit(entry.measure))<.001});
-  delete entry.note.pitches;delete entry.note.positions;delete entry.note.positionImported;delete entry.note.tabImported;delete entry.note.tuplet;delete entry.note.accidental;delete entry.note.accidentals;delete entry.note.diatonicMidis;
+  delete entry.note.pitches;delete entry.note.positions;delete entry.note.positionImported;delete entry.note.tabImported;delete entry.note.tuplet;delete entry.note.accidental;delete entry.note.accidentals;delete entry.note.diatonicMidis;delete entry.note.lyric;delete entry.note.articulations;
   score.annotations = score.annotations.filter((a) => a.start.noteId !== entry.note.id && a.end.noteId !== entry.note.id);
   render();
 }
@@ -1560,6 +1918,23 @@ function extendSelectionByKeyboard(direction) {
     if(end===s.measure)delete s.measureRangeEnd;else s.measureRangeEnd=end;
   }
   updateControls();render();
+}
+
+function deleteMeasures() {
+  const [first,last]=selectedMeasureRange();
+  const count=last-first+1;
+  remember();
+  const removed=new Set(score.measures.slice(first,last+1).flatMap((measure)=>measure.voices.flat().map((note)=>note.id)));
+  score.measures.splice(first,count);
+  if(!score.measures.length)score.measures.push(createMeasure());
+  removeAnnotationsForNotes(removed);
+  score.annotations.forEach((annotation)=>['start','end'].forEach((side)=>{
+    if(annotation[side]?.measure>last)annotation[side].measure-=count;
+  }));
+  const next=Math.min(first,score.measures.length-1);
+  score.selection={measure:next,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:0,rangeEnd:null};
+  updateControls();render();
+  status.textContent=`${count}개 마디를 삭제했습니다. Ctrl+Z(⌘Z)로 되돌릴 수 있습니다.`;
 }
 
 function copyMeasures() {
@@ -1662,6 +2037,13 @@ function toMusicXml() {
     if(annotation.end?.noteId){const list=annotationEnds.get(annotation.end.noteId)||[];list.push(annotation);annotationEnds.set(annotation.end.noteId,list);}
   });
   let exportedKey=Number(score.keyFifths)||0;
+  const syllabic=new Map(),previousHyphen=new Map();
+  selectionOrder().forEach(({note,voice})=>{
+    if(note.rest||!note.lyric?.text)return;
+    const before=previousHyphen.get(voice)||false;
+    syllabic.set(note.id,note.lyric.hyphen?(before?'middle':'begin'):(before?'end':'single'));
+    previousHyphen.set(voice,!!note.lyric.hyphen);
+  });
   const timeXml=(mi)=>{const time=measureTimeSignature(mi);return `<time${score.timeSymbol==='common'&&!score.measures[mi].pickup?' symbol="common"':''}><beats>${time.beats}</beats><beat-type>${time.beatType}</beat-type></time>`;};
   const measures = score.measures.map((m, mi) => {
     let body = `${mi > 0 && score.measures[mi-1].forceBreakAfter ? '<print new-system="yes"/>' : ''}${mi === 0 ? `<attributes><divisions>8</divisions><key><fifths>${score.keyFifths||0}</fifths></key>${timeXml(0)}<staves>2</staves>${score.instrument==='piano'?'':'<transpose><diatonic>0</diatonic><chromatic>0</chromatic><octave-change>-1</octave-change></transpose>'}<clef number="1"><sign>G</sign><line>2</line></clef>${score.instrument==='piano'?'<clef number="2"><sign>F</sign><line>4</line></clef>':'<clef number="2"><sign>TAB</sign><line>5</line></clef><staff-details number="2"><staff-lines>6</staff-lines></staff-details>'}</attributes>${score.tempo?`<direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${score.tempo}</per-minute></metronome></direction-type><sound tempo="${score.tempo}"/></direction>`:''}` : ''}`;
@@ -1679,17 +2061,19 @@ function toMusicXml() {
         if(n.dynamic)body+=`<direction placement="below"><direction-type><dynamics><${n.dynamic}/></dynamics></direction-type></direction>`;
         starts.filter((annotation)=>annotation.type==='crescendo'||annotation.type==='diminuendo').forEach((annotation)=>{body+=`<direction placement="below"><direction-type><wedge type="${annotation.type==='crescendo'?'crescendo':'diminuendo'}" number="1"/></direction-type></direction>`;});
         ends.filter((annotation)=>annotation.type==='crescendo'||annotation.type==='diminuendo').forEach(()=>{body+='<direction placement="below"><direction-type><wedge type="stop" number="1"/></direction-type></direction>';});
-        const xmlMidi = score.instrument === 'piano' ? n.midi : n.midi + 12;
-        const pc = ((xmlMidi%12)+12)%12, octave = Math.floor(xmlMidi/12)-1;
+        const natural=n.rest?n.midi:naturalMidiForKey(n,0,n.midi,n.accidentals?.[0]??n.accidental);
+        const xmlNatural=score.instrument==='piano'?natural:natural+12;
+        const pc=((xmlNatural%12)+12)%12, octave=Math.floor(xmlNatural/12)-1, alter=Math.round(n.midi-natural);
         const dots=n.dots??(n.dotted?1:0),notations=[];
         if(!n.rest&&score.instrument!=='piano')notations.push(`<technical><string>${n.string}</string><fret>${n.fret}</fret></technical>`);
+        if(!n.rest&&n.articulations?.length)notations.push(`<articulations>${n.articulations.map((name)=>`<${name}/>`).join('')}</articulations>`);
         if(n.fermata)notations.push(`<fermata${n.fermata==='below'?' type="inverted"':''}/>`);
         starts.filter((annotation)=>annotation.type==='tie').forEach(()=>notations.push('<tied type="start"/>'));
         ends.filter((annotation)=>annotation.type==='tie').forEach(()=>notations.push('<tied type="stop"/>'));
         starts.filter((annotation)=>annotation.type==='slur').forEach(()=>notations.push('<slur type="start" number="1"/>'));
         ends.filter((annotation)=>annotation.type==='slur').forEach(()=>notations.push('<slur type="stop" number="1"/>'));
         const ties=`${starts.some((annotation)=>annotation.type==='tie')?'<tie type="start"/>':''}${ends.some((annotation)=>annotation.type==='tie')?'<tie type="stop"/>':''}`;
-        body += `<note>${n.grace?`<grace${n.graceSlash?' slash="yes"':''}/>`:''}${n.rest?'<rest/>':`<pitch><step>${STEP[pc]}</step>${ALTER[pc]?'<alter>1</alter>':''}<octave>${octave}</octave></pitch>`}${n.grace?'':`<duration>${durationTicks(n)}</duration>`}${ties}<voice>${vi+1}</voice><type>${({32:'whole',16:'half',8:'quarter',4:'eighth',2:'16th',1:'32nd'})[n.duration]||'quarter'}</type>${'<dot/>'.repeat(dots)}${n.tuplet?`<time-modification><actual-notes>${n.tuplet.actual}</actual-notes><normal-notes>${n.tuplet.normal}</normal-notes></time-modification>`:''}<staff>1</staff>${n.beams?.map((beam)=>`<beam number="${beam.number}">${beam.value}</beam>`).join('')||''}${notations.length?`<notations>${notations.join('')}</notations>`:''}</note>`;
+        body += `<note>${n.grace?`<grace${n.graceSlash?' slash="yes"':''}/>`:''}${n.rest?'<rest/>':`<pitch><step>${STEP[pc]}</step>${alter?`<alter>${alter}</alter>`:''}<octave>${octave}</octave></pitch>`}${n.grace?'':`<duration>${durationTicks(n)}</duration>`}${ties}<voice>${vi+1}</voice><type>${({32:'whole',16:'half',8:'quarter',4:'eighth',2:'16th',1:'32nd'})[n.duration]||'quarter'}</type>${'<dot/>'.repeat(dots)}${n.tuplet?`<time-modification><actual-notes>${n.tuplet.actual}</actual-notes><normal-notes>${n.tuplet.normal}</normal-notes></time-modification>`:''}<staff>1</staff>${n.beams?.map((beam)=>`<beam number="${beam.number}">${beam.value}</beam>`).join('')||''}${notations.length?`<notations>${notations.join('')}</notations>`:''}${!n.rest&&n.lyric?.text?`<lyric number="1"><syllabic>${syllabic.get(n.id)||'single'}</syllabic><text>${escapeXml(n.lyric.text)}</text></lyric>`:''}</note>`;
       });
     });
     if(m.repeatEnd)body+='<barline location="right"><repeat direction="backward"/></barline>';
@@ -1845,6 +2229,8 @@ function vectorScoreClone() {
     node.setAttribute('font-weight',Number(style.fontWeight)>=600||style.fontWeight==='bold'?'bold':'normal');
     node.setAttribute('font-style',style.fontStyle==='italic'?'italic':'normal');
     node.setAttribute('fill','#111');
+    // Text inherits VexFlow's group stroke in svg2pdf, which thickens glyphs.
+    node.setAttribute('stroke','none');
     const inline=node.getAttribute('style');
     if(inline)node.setAttribute('style',inline.replace(/font[^;]*;?/g,''));
   });
@@ -1855,6 +2241,9 @@ function vectorScoreClone() {
       node.setAttribute(attr,value.replaceAll('#aeb4bf','#111').replaceAll('#2368c4','#111').replaceAll('#b33a3a','#111').replaceAll('#15805f','#111').replaceAll('#d97706','#111'));
     }
   });
+  // svg2pdf only switches fonts when a text's weight differs from its parent's;
+  // a numeric root weight makes every explicitly weighted text set its font.
+  clone.setAttribute('font-weight','400');
   const style=document.createElementNS(NS,'style');
   style.textContent='.slur,.tie,.ending-line{fill:none;stroke:#111;stroke-width:1.5}.barre{fill:none;stroke:#111;stroke-width:1.2;stroke-dasharray:5 4}';
   clone.prepend(style);
@@ -1895,6 +2284,7 @@ async function exportPdf() {
       clone.setAttribute('width',sourceWidth);clone.setAttribute('height',slice.height);
       doc.saveGraphicsState();
       doc.rect(margin,top,contentWidth,slice.height*scale,null);doc.clip();doc.discardPath();
+      doc.setFont('times','normal');
       await window.svg2pdf.svg2pdf(clone,doc,{x:margin,y:top,width:contentWidth,height:slice.height*scale});
       doc.restoreGraphicsState();
     }
@@ -2133,6 +2523,11 @@ function importMusicXml(text) {
       if(timeModification)note.tuplet={actual:Number(timeModification.querySelector('actual-notes')?.textContent||0),normal:Number(timeModification.querySelector('normal-notes')?.textContent||0)};
       const fermataNode=nx.querySelector('fermata');
       note.fermata=fermataNode?(fermataNode.getAttribute('type')==='inverted'?'below':true):false;
+      const lyricNode=nx.querySelector(':scope > lyric');
+      const lyricText=lyricNode?.querySelector('text')?.textContent?.trim();
+      if(lyricText&&!isChord)note.lyric={text:lyricText,hyphen:['begin','middle'].includes(lyricNode.querySelector('syllabic')?.textContent?.trim())};
+      const articulations=[...nx.querySelectorAll('notations articulations > *')].map((node)=>node.tagName).filter((name)=>ARTICULATIONS[name]);
+      if(articulations.length)note.articulations=articulations;
       let storedNote=note;
       if(isChord){
         const previous=m.voices[voice].at(-1);
@@ -2307,6 +2702,7 @@ $('#deleteVoice').addEventListener('click',()=>deleteActiveVoice(false));
 $('#deleteMeasureVoice').addEventListener('click',()=>deleteActiveVoice(true));
 $('#grace').addEventListener('click', () => {graceMode=!graceMode;updateControls();render();});
 $('#tie').addEventListener('click', () => addAnnotation('tie'));
+document.querySelectorAll('[data-articulation]').forEach((button)=>button.addEventListener('click',()=>toggleArticulation(button.dataset.articulation)));
 $('#slur').addEventListener('click', () => addAnnotation('slur'));
 $('#hammerPull').addEventListener('click', () => addAnnotation('slur'));
 $('#triplet').addEventListener('click', toggleTuplet);
@@ -2328,6 +2724,11 @@ $('#barre').addEventListener('click', () => {
 });
 $('#undo').addEventListener('click', undo);
 $('#copyMeasures').addEventListener('click', copyMeasures);
+$('#deleteMeasures').addEventListener('click', deleteMeasures);
+$('#newScore').addEventListener('click', newScore);
+$('#lyrics').addEventListener('click', startLyrics);
+$('#songs').addEventListener('click', openSongList);
+$('#songsDialog .close-dialog').addEventListener('click', () => $('#songsDialog').close());
 $('#pasteMeasures').addEventListener('click', pasteMeasures);
 window.addEventListener('pagehide', saveToBrowser);
 $('#clear').addEventListener('click', () => { remember();score.measures=[createMeasure()];score.annotations=[];score.selection={measure:0,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:0,rangeEnd:null};render(); });
@@ -2339,6 +2740,7 @@ $('#systemSpacing').addEventListener('change', (e) => { score.systemSpacing=Numb
 $('#timeSignature').addEventListener('change', (e) => { const [beats,beatType]=e.target.value.split('/').map(Number);score.timeSignature={beats,beatType};render(); });
 $('#pickup').addEventListener('click',()=>setPickup(!score.measures[score.selection.measure]?.pickup));
 $('#pickupTimeSignature').addEventListener('change',()=>{if(score.measures[score.selection.measure]?.pickup)setPickup(true);});
+$('#transpose').addEventListener('click',()=>transposeScore(Number($('#transposeInterval').value)));
 $('#keySignature').addEventListener('change', (e) => {score.keyFifths=Number(e.target.value);render();});
 $('#tempo').addEventListener('change', (e) => {score.tempo=Math.max(20,Math.min(300,Number(e.target.value)||120));e.target.value=score.tempo;render();});
 $('#addDirection').addEventListener('click', () => {const text=$('#directionText').value.trim();if(!text)return;const measure=score.measures[score.selection.measure];remember();measure.directions??=[];measure.directions.push({text,placement:$('#directionPlacement').value,align:$('#directionAlign').value});$('#directionText').value='';render();});
@@ -2354,7 +2756,7 @@ function isCommaShortcut(event){
 }
 
 function handleTieShortcut(event){
-  if(!isCommaShortcut(event)||event.target?.matches?.('input,select,textarea')||$('#helpDialog').open)return;
+  if(!isCommaShortcut(event)||event.target?.matches?.('input,select,textarea')||document.querySelector('dialog[open]'))return;
   event.preventDefault();
   event.stopImmediatePropagation();
   // iPadOS can expose a punctuation key on keypress or keyup instead of
@@ -2371,11 +2773,13 @@ window.addEventListener('keypress',handleTieShortcut,true);
 window.addEventListener('keyup',handleTieShortcut,true);
 
 document.addEventListener('keydown', (e) => {
-  if (e.target?.matches?.('input,select,textarea') || $('#helpDialog').open) return;
+  if (e.target?.matches?.('input,select,textarea') || document.querySelector('dialog[open]')) return;
   if(e.ctrlKey||e.metaKey){
     if(e.code==='KeyC'){e.preventDefault();copyMeasures();return;}
     if(e.code==='KeyV'){e.preventDefault();pasteMeasures();return;}
     if(e.code==='KeyZ'&&!e.shiftKey){e.preventDefault();undo();return;}
+    if(e.code==='Backspace'||e.code==='Delete'){e.preventDefault();deleteMeasures();return;}
+    if(e.code==='KeyL'){e.preventDefault();startLyrics();return;}
     if(e.code!=='ArrowUp'&&e.code!=='ArrowDown')return;
   }
   if(e.code==='Equal'||e.key==='='){e.preventDefault();applyAccidental(1);return;}

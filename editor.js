@@ -25,6 +25,7 @@ let graceMode = false;
 let fretBuffer = '';
 let undoStack = [];
 let dragAnchor = null;
+let touchDrag = null;
 let dragMoved = false;
 let ignoreNextClick = false;
 let renderedNotes = new Map();
@@ -100,20 +101,46 @@ function setSelection(measure, voice, noteId = null, extend = false, source = 's
 function beginRangeSelection(event, measure, voice, noteId, source) {
   if (event.button !== 0) return;
   event.preventDefault();
-  // Touch and pen pointers are captured by the element they start on, so
-  // neighbouring notes would never see pointerenter during a drag.
-  if (event.pointerType !== 'mouse') try { event.target.releasePointerCapture?.(event.pointerId); } catch {}
   dragAnchor = { measure, voice, noteId, source };
   dragMoved = false;
+  if (event.pointerType !== 'mouse') {
+    // Touch and pen: the SVG must not be rebuilt while the finger is down.
+    // Removing the touched element swallows the rest of the gesture (moves
+    // and the final touchend stop reaching the document), so the drag is
+    // previewed with an overlay and committed when the finger lifts.
+    try { event.target.releasePointerCapture?.(event.pointerId); } catch {}
+    touchDrag = { end: null };
+    drawTouchRange();
+    return;
+  }
   setSelection(measure, voice, noteId, false, source);
 }
 
 function extendRangeSelection(measure, voice, noteId) {
   if (!dragAnchor || (dragAnchor.measure === measure && dragAnchor.voice === voice && dragAnchor.noteId === noteId)) return;
   dragMoved = true;
+  if (touchDrag) { touchDrag.end = { measure, voice, noteId }; drawTouchRange(); return; }
   score.selection.rangeEnd = { measure, voice, noteId };
   updateControls();
   render();
+}
+
+function drawTouchRange() {
+  notationSvg?.querySelector('.touch-range')?.remove();
+  const a = renderedNotes.get(dragAnchor?.noteId), b = renderedNotes.get(touchDrag?.end?.noteId || dragAnchor?.noteId);
+  if (!a || !b || !notationSvg) return;
+  const [first, last] = a.system < b.system || (a.system === b.system && a.x <= b.x) ? [a, b] : [b, a];
+  const x1 = first.x - 13, x2 = last.system === first.system ? last.x + 13 : notationSvg.viewBox.baseVal.width - 10;
+  svg('rect', { x:x1, y:first.staffY - 25, width:Math.max(26, x2 - x1), height:first.tabY - first.staffY + 110, class:'range-selection touch-range' });
+}
+
+function finishTouchDrag() {
+  if (!touchDrag || !dragAnchor) return;
+  const anchor = dragAnchor, end = touchDrag.end, moved = dragMoved;
+  touchDrag = null; dragAnchor = null; dragMoved = false;
+  if (moved) ignoreNextClick = true;
+  setSelection(anchor.measure, anchor.voice, anchor.noteId, false, anchor.source);
+  if (moved && end) { score.selection.rangeEnd = end; updateControls(); render(); }
 }
 
 // Finger and Apple Pencil drags: find the note under the pointer directly.
@@ -126,8 +153,13 @@ document.addEventListener('pointermove', (event) => {
   extendRangeSelection(Number(hit.dataset.measure), voice, hit.dataset.noteId);
 });
 
-document.addEventListener('pointerup', () => {
+document.addEventListener('touchend', finishTouchDrag);
+document.addEventListener('touchcancel', finishTouchDrag);
+document.addEventListener('pointercancel', (event) => { if (event.pointerType !== 'mouse') finishTouchDrag(); });
+
+document.addEventListener('pointerup', (event) => {
   hairpinDrag = null;
+  if (touchDrag) { finishTouchDrag(); return; }
   if (dragMoved) ignoreNextClick = true;
   dragAnchor = null;
   dragMoved = false;
@@ -574,6 +606,8 @@ function endpointFor(ref) {
   if (!ref) return null;
   return renderedNotes.get(ref.noteId) || null;
 }
+
+const TIED_TAB_COLOR = '#a3a9b3';
 
 const ARTICULATIONS = {
   staccato:{code:'a.',label:'스타카토'}, accent:{code:'a>',label:'악센트'},
@@ -1133,7 +1167,10 @@ function render() {
   const requestedSpacing=Math.max(225, Math.min(320, Number(score.systemSpacing) || 245));
   // Lyrics get their own band between the staff and the TAB/bass staff.
   const lyricSpace=scoreHasLyrics()?26*densityScale:0;
-  const systemHeight = (showLowerStaff?requestedSpacing*densityScale:Math.max(120,requestedSpacing*.54)*Math.min(densityScale,1.25))+lyricSpace, top = 5*densityScale;
+  // Guitar TAB sits well below the staff (room for TAB stems and lyrics);
+  // the piano's bass staff stays close like a grand staff.
+  const lowerOffset=score.instrument==='piano'?122:160;
+  const systemHeight = (showLowerStaff?(requestedSpacing+lowerOffset-122)*densityScale:Math.max(120,requestedSpacing*.54)*Math.min(densityScale,1.25))+lyricSpace, top = 5*densityScale;
   const logicalHeight=Math.max(220*densityScale,top+sys.length*systemHeight);
   if(!VF){status.textContent='악보 렌더링 라이브러리를 불러오지 못했습니다.';return;}
   const context=new VF.SVGContext(scoreSvg).resize(width,logicalHeight);
@@ -1144,6 +1181,7 @@ function render() {
   notationSvg.setAttribute('preserveAspectRatio','xMinYMin meet');
   const layouts = new Map();
   const selected=selectedIds();
+  const tiedEndIds=new Set(score.annotations.filter((annotation)=>annotation.type==='tie').map((annotation)=>annotation.end?.noteId));
   const voiceColors=['#111','#2368c4','#b33a3a','#15805f'];
   let currentKeyFifths=Number(score.keyFifths)||0;
   sys.forEach((items, systemIndex) => {
@@ -1165,7 +1203,7 @@ function render() {
       const measureWidth=measureWidths[localIndex];
       const x=runningX;runningX+=measureWidth;
       const staff=new VF.Stave(x,y,measureWidth);
-      const lowerY=y+122*densityScale+lyricSpace;
+      const lowerY=y+lowerOffset*densityScale+lyricSpace;
       const lower=showLowerStaff?(piano?new VF.Stave(x,lowerY,measureWidth):new VF.TabStave(x,lowerY,measureWidth)):null;
       const keyChanged=Number.isFinite(measure.keyFifths)&&measure.keyFifths!==currentKeyFifths;
       if(Number.isFinite(measure.keyFifths))currentKeyFifths=measure.keyFifths;
@@ -1240,7 +1278,12 @@ function render() {
           staffNotes.push(staveNote);staffById.set(note.id,staveNote);
           const tabNote=lower?(note.rest?new VF.GhostNote({duration:vexDuration(note)}):new VF.TabNote({positions:chordPositions,duration:vexDuration(note),stem_direction:direction},true)):null;
           if(tabNote&&!note.rest)for(let dotIndex=0;dotIndex<dotCount;dotIndex++)VF.Dot.buildAndAttach([tabNote],{all:true});
-          if(tabNote&&!note.rest)tabNote.setStyle({fillStyle:noteColor,strokeStyle:noteColor});
+          if(tabNote&&!note.rest){
+            // A fret reached through a tie is not plucked again: show it grey.
+            const tied=tiedEndIds.has(note.id)&&!(active&&selected.has(note.id));
+            tabNote.setStyle(tied?{fillStyle:TIED_TAB_COLOR,strokeStyle:TIED_TAB_COLOR}:{fillStyle:noteColor,strokeStyle:noteColor});
+            if(tied)tabNote.setStemStyle?.({fillStyle:voiceColor,strokeStyle:voiceColor});
+          }
           if(pendingStaffGrace.length){
             const group=new VF.GraceNoteGroup(pendingStaffGrace,false);
             if(pendingStaffGrace.length>1)group.beamNotes();
@@ -2307,6 +2350,7 @@ function vectorScoreClone() {
       const x=Number(live.getAttribute('x'))||box.x,y=Number(live.getAttribute('y'))||box.y+box.height;
       const left=anchor==='middle'?x-image.width/2:anchor==='end'?x-image.width:x-image.padding;
       const replacement=document.createElementNS(NS,'image');
+      if(node.hasAttribute('data-pdf-system'))replacement.setAttribute('data-pdf-system',node.getAttribute('data-pdf-system'));
       Object.entries({x:left,y:y-image.ascent,width:image.width,height:image.height,href:image.url}).forEach(([key,value])=>replacement.setAttribute(key,value));
       node.replaceWith(replacement);return;
     }
@@ -2314,7 +2358,8 @@ function vectorScoreClone() {
     node.setAttribute('font-size',style.fontSize);
     node.setAttribute('font-weight',Number(style.fontWeight)>=600||style.fontWeight==='bold'?'bold':'normal');
     node.setAttribute('font-style',style.fontStyle==='italic'?'italic':'normal');
-    node.setAttribute('fill','#111');
+    // Voice colours print black; tied TAB frets keep their grey.
+    node.setAttribute('fill',style.fill==='rgb(163, 169, 179)'?TIED_TAB_COLOR:'#111');
     // Text inherits VexFlow's group stroke in svg2pdf, which thickens glyphs.
     node.setAttribute('stroke','none');
     const inline=node.getAttribute('style');
@@ -2336,7 +2381,37 @@ function vectorScoreClone() {
   return clone;
 }
 
+const PDF_HIDDEN_CLASSES=['hit','measure-hit','selected-measure','hairpin-handle','range-selection','measure-warning-bg','measure-warning-text','break-mark'];
+
+// Tags every drawn element of the live score with its system (by the centre
+// of its box) and measures each system's real vertical extent.
+function tagPdfSystems() {
+  const breaks=[...renderedSystemBreaks];
+  const systems=breaks.map(()=>({top:Infinity,bottom:-Infinity}));
+  notationSvg.querySelectorAll('path,rect,line,text,ellipse,circle,polyline,polygon,image').forEach((node)=>{
+    let box;try{box=node.getBBox();}catch{return;}
+    const centre=box.y+box.height/2;
+    let index=breaks.findIndex((end)=>centre<end);
+    if(index<0)index=breaks.length-1;
+    node.setAttribute('data-pdf-system',index);
+    if(PDF_HIDDEN_CLASSES.some((name)=>node.classList?.contains(name))||(!box.width&&!box.height))return;
+    systems[index].top=Math.min(systems[index].top,box.y);
+    systems[index].bottom=Math.max(systems[index].bottom,box.y+box.height);
+  });
+  return systems.map((system,index)=>({index,...system})).filter((system)=>Number.isFinite(system.top));
+}
+
+async function loadPdfFonts() {
+  if(!document.fonts?.load)return;
+  const family=score.textFont||'Georgia, serif';
+  const texts=[...notationSvg.querySelectorAll('text')].map((node)=>node.textContent||'')
+    .concat(Object.values(score.metadata)).filter((text)=>text&&!PDF_LATIN_TEXT.test(text));
+  const unique=[...new Set(texts)].slice(0,400);
+  await Promise.all(unique.flatMap((text)=>[`16px ${family}`,`bold 16px ${family}`].map((font)=>document.fonts.load(font,text).catch(()=>null))));
+}
+
 // Vector PDF: notation stays as paths, so it prints sharply at any zoom.
+// Systems are placed four to a page and spread evenly down the page.
 async function exportPdf() {
   const jsPDF=window.jspdf?.jsPDF;
   if(!jsPDF||!window.svg2pdf?.svg2pdf)return exportRasterPdf();
@@ -2344,41 +2419,62 @@ async function exportPdf() {
   holder.style.cssText='position:fixed;left:-10000px;top:0;width:10px;height:10px;overflow:hidden;';
   document.body.appendChild(holder);
   try {
+    await loadPdfFonts();
     const sizes={A4:[595.28,841.89],A3:[841.89,1190.55],Letter:[612,792],Screen:[595.28,841.89]};
     const [pageWidth,pageHeight]=sizes[score.page]||sizes.A4;
-    const clone=vectorScoreClone();
-    holder.appendChild(clone);
-    const [, , sourceWidth, sourceHeight]=notationSvg.getAttribute('viewBox').trim().split(/\s+/).map(Number);
-    const margin=pageWidth*.065, contentWidth=pageWidth-margin*2, scale=contentWidth/sourceWidth;
+    const systems=tagPdfSystems();
+    const base=vectorScoreClone();
+    const [, , sourceWidth]=notationSvg.getAttribute('viewBox').trim().split(/\s+/).map(Number);
+    const marginX=pageWidth*.075, contentWidth=pageWidth-marginX*2;
     const hasMetadata=Object.values(score.metadata).some(Boolean);
-    const firstTop=hasMetadata?pageHeight*.12:margin, normalTop=margin;
-    const slices=pdfPageSlices(sourceHeight,(pageHeight-firstTop-margin)/scale,(pageHeight-normalTop-margin)/scale,[...renderedSystemBreaks]);
+    const normalTop=pageHeight*.06, bottomMargin=pageHeight*.065, firstTop=hasMetadata?pageHeight*.17:normalTop;
+    const perPage=4, minGap=14, pad=4;
+    const pages=[];
+    for(let index=0;index<systems.length;index+=perPage)pages.push(systems.slice(index,index+perPage));
+    if(!pages.length)pages.push([]);
+    const heightOf=(system)=>system.bottom-system.top+pad*2;
+    const available=(pageIndex)=>pageHeight-(pageIndex?normalTop:firstTop)-bottomMargin;
+    let scale=contentWidth/sourceWidth;
+    pages.forEach((page,pageIndex)=>{
+      const total=page.reduce((sum,system)=>sum+heightOf(system),0);
+      if(total)scale=Math.min(scale,(available(pageIndex)-(page.length-1)*minGap)/total);
+    });
+    const averageHeight=systems.length?systems.reduce((sum,system)=>sum+heightOf(system),0)/systems.length:0;
+    const fullGaps=pages.map((page,pageIndex)=>page.length===perPage?(available(pageIndex)-page.reduce((sum,system)=>sum+heightOf(system),0)*scale)/(perPage-1):null).filter((gap)=>gap!==null);
+    const standardGap=Math.max(minGap,Math.min(90,fullGaps.length?fullGaps.reduce((a,b)=>a+b,0)/fullGaps.length:(available(1)-perPage*averageHeight*scale)/(perPage-1)));
+    const drawWidth=sourceWidth*scale, x=marginX+(contentWidth-drawWidth)/2;
     const doc=new jsPDF({unit:'pt',format:[pageWidth,pageHeight],compress:true});
     doc.setProperties({title:score.metadata.title||'score',author:score.metadata.composer||''});
-    for(const [pageIndex,slice] of slices.entries()) {
+    for(const [pageIndex,page] of pages.entries()) {
       if(pageIndex)doc.addPage([pageWidth,pageHeight]);
-      if(slice.first&&hasMetadata){
-        drawPdfText(doc,score.metadata.title,pageWidth/2,pageHeight*.05,pageWidth*.035*.82,{align:'center',bold:true});
-        drawPdfText(doc,score.metadata.lyricist,margin,pageHeight*.085,pageWidth*.018*.82);
-        drawPdfText(doc,score.metadata.composer,pageWidth-margin,pageHeight*.085,pageWidth*.018*.82,{align:'right'});
-      }else if(!slice.first&&score.metadata.title){
-        drawPdfText(doc,String(pageIndex+1),margin,pageHeight*.027,pageWidth*.015*.82);
-        drawPdfText(doc,score.metadata.title,margin+pageWidth*.035,pageHeight*.027,pageWidth*.015*.82);
+      if(!pageIndex&&hasMetadata){
+        drawPdfText(doc,score.metadata.title,pageWidth/2,pageHeight*.08,pageWidth*.032,{align:'center',bold:true});
+        drawPdfText(doc,score.metadata.lyricist,marginX,pageHeight*.13,pageWidth*.018);
+        drawPdfText(doc,score.metadata.composer,pageWidth-marginX,pageHeight*.13,pageWidth*.018,{align:'right'});
+      }else if(pageIndex){
+        drawPdfText(doc,String(pageIndex+1),pageWidth-marginX,pageHeight*.035,pageWidth*.017,{align:'right'});
+        if(score.metadata.title)drawPdfText(doc,score.metadata.title,marginX,pageHeight*.035,pageWidth*.015);
       }
-      const top=slice.first?firstTop:normalTop;
-      clone.setAttribute('viewBox',`0 ${slice.sourceY} ${sourceWidth} ${slice.height}`);
-      clone.setAttribute('width',sourceWidth);clone.setAttribute('height',slice.height);
-      doc.saveGraphicsState();
-      doc.rect(margin,top,contentWidth,slice.height*scale,null);doc.clip();doc.discardPath();
-      doc.setFont('times','normal');
-      await window.svg2pdf.svg2pdf(clone,doc,{x:margin,y:top,width:contentWidth,height:slice.height*scale});
-      doc.restoreGraphicsState();
+      const gap=page.length===perPage?(available(pageIndex)-page.reduce((sum,system)=>sum+heightOf(system),0)*scale)/(perPage-1):standardGap;
+      let y=pageIndex?normalTop:firstTop;
+      for(const system of page){
+        const clone=base.cloneNode(true);
+        clone.querySelectorAll('[data-pdf-system]').forEach((node)=>{if(Number(node.getAttribute('data-pdf-system'))!==system.index)node.remove();});
+        const height=heightOf(system);
+        clone.setAttribute('viewBox',`0 ${system.top-pad} ${sourceWidth} ${height}`);
+        clone.setAttribute('width',sourceWidth);clone.setAttribute('height',height);
+        holder.replaceChildren(clone);
+        doc.setFont('times','normal');
+        await window.svg2pdf.svg2pdf(clone,doc,{x,y,width:drawWidth,height:height*scale});
+        y+=height*scale+gap;
+      }
     }
     download(pdfFileName(),doc.output("blob"),"application/pdf");
   } catch(error) {
     alert(`PDF 생성 중 문제가 생겼습니다: ${error.message}`);
   } finally {
     holder.remove();
+    notationSvg?.querySelectorAll('[data-pdf-system]').forEach((node)=>node.removeAttribute('data-pdf-system'));
   }
 }
 
@@ -2921,15 +3017,45 @@ document.addEventListener('keydown', (e) => {
   else if (e.code === 'Escape') { score.selection.rangeEnd=null;delete score.selection.measureRangeEnd;render(); }
 });
 
-document.querySelectorAll('.tool-group').forEach((group)=>{
+// Bottom dock: one row of category tabs and, above the keyboard edge, the
+// tools of the chosen category only. Tapping the open tab hides the tools.
+const dock=$('#dock'),dockTabs=$('#dockTabs');
+const toolGroups=[...document.querySelectorAll('.tool-group')];
+const DOCK_TAB_KEY='guitar-score-app:dock-tab';
+function selectDockTab(index, toggle=false) {
+  const wasActive=toolGroups[index]?.classList.contains('active');
+  if(toggle&&wasActive&&!dock.classList.contains('panel-collapsed')){dock.classList.add('panel-collapsed');}
+  else dock.classList.remove('panel-collapsed');
+  toolGroups.forEach((group,groupIndex)=>group.classList.toggle('active',groupIndex===index));
+  dockTabs.querySelectorAll('.dock-tab').forEach((tab,tabIndex)=>{tab.classList.toggle('active',tabIndex===index);tab.setAttribute('aria-selected',String(tabIndex===index));});
+  try{localStorage.setItem(DOCK_TAB_KEY,String(index));}catch{}
+  fitDockPadding();
+}
+function fitDockPadding() {
+  document.body.style.paddingBottom=`${dock.offsetHeight+8}px`;
+}
+toolGroups.forEach((group,index)=>{
   const label=group.querySelector('.group-label');
-  if(!label)return;
-  label.setAttribute('role','button');label.setAttribute('tabindex','0');
-  label.title=`${label.textContent.trim()} 메뉴 접기 또는 펼치기`;
-  const toggle=()=>{group.classList.toggle('collapsed');label.setAttribute('aria-expanded',String(!group.classList.contains('collapsed')));};
-  label.addEventListener('click',toggle);
-  label.addEventListener('keydown',(event)=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();toggle();}});
+  const tab=document.createElement('button');
+  tab.type='button';tab.className='dock-tab';tab.setAttribute('role','tab');
+  tab.title=`${label.textContent.trim()} 도구`;
+  const icon=document.createElement('span');
+  icon.className=`tab-icon${/^[a-z]+$/.test(label.dataset.icon)?' text-icon':''}`;icon.textContent=label.dataset.icon;
+  const name=document.createElement('span');name.textContent=label.dataset.short;
+  tab.append(icon,name);
+  tab.addEventListener('click',()=>selectDockTab(index,true));
+  dockTabs.appendChild(tab);
 });
+const dockSpacer=document.createElement('span');dockSpacer.className='dock-spacer';
+const quickUndo=document.createElement('button');
+quickUndo.type='button';quickUndo.className='dock-quick';quickUndo.textContent='↶';quickUndo.title='실행 취소 (Ctrl+Z)';quickUndo.setAttribute('aria-label','실행 취소');
+quickUndo.addEventListener('click',undo);
+dockTabs.append(dockSpacer,quickUndo);
+let savedDockTab=0;
+try{savedDockTab=Math.max(0,Math.min(toolGroups.length-1,Number(localStorage.getItem(DOCK_TAB_KEY))||0));}catch{}
+selectDockTab(savedDockTab);
+if(typeof ResizeObserver!=='undefined')new ResizeObserver(fitDockPadding).observe(dock);
+window.addEventListener('resize',fitDockPadding);
 
 // Native title bubbles are delayed, inconsistent between browsers, and are
 // commonly suppressed for SVG-only buttons. Mirror every toolbar title into
@@ -2939,22 +3065,22 @@ document.querySelectorAll('.toolbar [title]').forEach((control)=>{
   control.setAttribute('aria-label',control.getAttribute('aria-label')||control.getAttribute('title'));
 });
 
-// Tooltips inside a horizontally scrolling toolbar are clipped by the
-// scroller on iPad split view. Use a viewport-level tooltip there so pointer
-// hover, keyboard focus, Apple Pencil hover, and touch all show the tool name.
+// The tool panel scrolls horizontally, which would clip CSS tooltips, so a
+// viewport-level tooltip above the control shows the tool name on pointer
+// hover, keyboard focus, Apple Pencil hover and touch.
 const compactToolTip=document.createElement('div');
 compactToolTip.className='compact-tool-tooltip';
 compactToolTip.setAttribute('role','status');
 document.body.appendChild(compactToolTip);
 let compactToolTipTimer=null;
 function showCompactToolTip(control){
-  if(!window.matchMedia('(max-width:850px)').matches||!control?.dataset.tooltip)return;
+  if(!control?.dataset.tooltip)return;
   clearTimeout(compactToolTipTimer);
   compactToolTip.textContent=control.dataset.tooltip;
   compactToolTip.classList.add('visible');
   const rect=control.getBoundingClientRect();
   compactToolTip.style.left=`${Math.max(80,Math.min(innerWidth-80,rect.left+rect.width/2))}px`;
-  compactToolTip.style.top=`${Math.min(innerHeight-45,rect.bottom+7)}px`;
+  compactToolTip.style.top=`${Math.max(45,rect.top-7)}px`;
   compactToolTipTimer=setTimeout(()=>compactToolTip.classList.remove('visible'),1800);
 }
 const toolbar=$('.toolbar');

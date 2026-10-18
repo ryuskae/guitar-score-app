@@ -30,6 +30,7 @@ let dragMoved = false;
 let ignoreNextClick = false;
 let renderedNotes = new Map();
 let renderedSystemBreaks = [];
+let renderedSystemCores = [];
 let measureWarning = null;
 let warningTimer = null;
 let selectedAnnotation = -1;
@@ -1153,6 +1154,7 @@ function render() {
   notationSvg=null;
   renderedNotes=new Map();
   renderedSystemBreaks=[];
+  renderedSystemCores=[];
   renderedLyricY=new Map();
   $('#printTitle').textContent = score.metadata.title;
   $('#printLyricist').textContent = score.metadata.lyricist || '';
@@ -1166,11 +1168,13 @@ function render() {
   const showLowerStaff=score.instrument==='piano'||score.showTab!==false;
   const requestedSpacing=Math.max(225, Math.min(320, Number(score.systemSpacing) || 245));
   // Lyrics get their own band between the staff and the TAB/bass staff.
-  const lyricSpace=scoreHasLyrics()?26*densityScale:0;
-  // Guitar TAB sits well below the staff (room for TAB stems and lyrics);
-  // the piano's bass staff stays close like a grand staff.
-  const lowerOffset=score.instrument==='piano'?122:160;
-  const systemHeight = (showLowerStaff?(requestedSpacing+lowerOffset-122)*densityScale:Math.max(120,requestedSpacing*.54)*Math.min(densityScale,1.25))+lyricSpace, top = 5*densityScale;
+  const lyricSpace=scoreHasLyrics()?26:0;
+  // Guitar TAB sits about twelve staff spaces below the staff (room for TAB
+  // stems and lyrics). Staves are not scaled by the measures-per-system
+  // density, so this gap is not either; only the space between systems is.
+  // The piano's bass staff keeps its grand-staff spacing.
+  const lowerOffset=score.instrument==='piano'?122*densityScale:150;
+  const systemHeight = (showLowerStaff?lowerOffset+(requestedSpacing-122)*densityScale:Math.max(120,requestedSpacing*.54)*Math.min(densityScale,1.25))+lyricSpace, top = 5*densityScale;
   const logicalHeight=Math.max(220*densityScale,top+sys.length*systemHeight);
   if(!VF){status.textContent='악보 렌더링 라이브러리를 불러오지 못했습니다.';return;}
   const context=new VF.SVGContext(scoreSvg).resize(width,logicalHeight);
@@ -1185,6 +1189,7 @@ function render() {
   const voiceColors=['#111','#2368c4','#b33a3a','#15805f'];
   let currentKeyFifths=Number(score.keyFifths)||0;
   sys.forEach((items, systemIndex) => {
+    const systemFirstNode=notationSvg.childNodes.length;
     const y=top+systemIndex*systemHeight;
     const left=32*densityScale, usable=width-left-72*densityScale;
     // The first measure of every system also contains clef, key and time
@@ -1203,7 +1208,7 @@ function render() {
       const measureWidth=measureWidths[localIndex];
       const x=runningX;runningX+=measureWidth;
       const staff=new VF.Stave(x,y,measureWidth);
-      const lowerY=y+lowerOffset*densityScale+lyricSpace;
+      const lowerY=y+lowerOffset+lyricSpace;
       const lower=showLowerStaff?(piano?new VF.Stave(x,lowerY,measureWidth):new VF.TabStave(x,lowerY,measureWidth)):null;
       const keyChanged=Number.isFinite(measure.keyFifths)&&measure.keyFifths!==currentKeyFifths;
       if(Number.isFinite(measure.keyFifths))currentKeyFifths=measure.keyFifths;
@@ -1397,6 +1402,11 @@ function render() {
     });
     if(firstStaff&&firstLower)new VF.StaveConnector(firstStaff,firstLower).setType('bracket').setContext(context).draw();
     renderedSystemBreaks.push(Math.min(logicalHeight,top+(systemIndex+1)*systemHeight));
+    // Everything VexFlow drew for this system is tagged with it, so PDF
+    // export never mistakes a high beam for part of the system above.
+    [...notationSvg.childNodes].slice(systemFirstNode).forEach((node)=>node.setAttribute?.('data-system',systemIndex));
+    const systemLayouts=[...layouts.values()].filter((layout)=>layout.system===systemIndex);
+    renderedSystemCores.push({top:Math.min(...systemLayouts.map((layout)=>layout.staffY)),bottom:Math.max(...systemLayouts.map((layout)=>layout.lowerBottom))});
   });
   // A translucent range makes drag selection unambiguous before applying a barre.
   let actionAnchor=null;
@@ -2386,13 +2396,19 @@ const PDF_HIDDEN_CLASSES=['hit','measure-hit','selected-measure','hairpin-handle
 // Tags every drawn element of the live score with its system (by the centre
 // of its box) and measures each system's real vertical extent.
 function tagPdfSystems() {
-  const breaks=[...renderedSystemBreaks];
-  const systems=breaks.map(()=>({top:Infinity,bottom:-Infinity}));
+  const cores=[...renderedSystemCores];
+  const systems=cores.map(()=>({top:Infinity,bottom:-Infinity}));
+  // Marks drawn after the systems (slurs, lyrics, dynamics) belong to the
+  // system whose staves are nearest to them.
+  const nearestSystem=(centre)=>cores.reduce((best,core,index)=>{
+    const distance=centre<core.top?core.top-centre:centre>core.bottom?centre-core.bottom:0;
+    return distance<best.distance?{index,distance}:best;
+  },{index:0,distance:Infinity}).index;
   notationSvg.querySelectorAll('path,rect,line,text,ellipse,circle,polyline,polygon,image').forEach((node)=>{
     let box;try{box=node.getBBox();}catch{return;}
-    const centre=box.y+box.height/2;
-    let index=breaks.findIndex((end)=>centre<end);
-    if(index<0)index=breaks.length-1;
+    const owner=node.closest('[data-system]');
+    const index=owner?Number(owner.getAttribute('data-system')):nearestSystem(box.y+box.height/2);
+    if(!systems[index])return;
     node.setAttribute('data-pdf-system',index);
     if(PDF_HIDDEN_CLASSES.some((name)=>node.classList?.contains(name))||(!box.width&&!box.height))return;
     systems[index].top=Math.min(systems[index].top,box.y);
@@ -2425,37 +2441,44 @@ async function exportPdf() {
     const systems=tagPdfSystems();
     const base=vectorScoreClone();
     const [, , sourceWidth]=notationSvg.getAttribute('viewBox').trim().split(/\s+/).map(Number);
-    const marginX=pageWidth*.075, contentWidth=pageWidth-marginX*2;
+    // Score width follows the page (8% side margins, as in engraved guitar
+    // books) and is never shrunk to squeeze systems in; each page takes as
+    // many systems as fit, at most four, spread evenly down the page.
+    const marginX=pageWidth*.08, contentWidth=pageWidth-marginX*2;
     const hasMetadata=Object.values(score.metadata).some(Boolean);
-    const normalTop=pageHeight*.06, bottomMargin=pageHeight*.065, firstTop=hasMetadata?pageHeight*.17:normalTop;
-    const perPage=4, minGap=14, pad=4;
-    const pages=[];
-    for(let index=0;index<systems.length;index+=perPage)pages.push(systems.slice(index,index+perPage));
-    if(!pages.length)pages.push([]);
+    const normalTop=pageHeight*.06, bottomMargin=pageHeight*.06, firstTop=hasMetadata?pageHeight*.15:normalTop;
+    const perPage=4, minGap=16, pad=4;
     const heightOf=(system)=>system.bottom-system.top+pad*2;
     const available=(pageIndex)=>pageHeight-(pageIndex?normalTop:firstTop)-bottomMargin;
     let scale=contentWidth/sourceWidth;
-    pages.forEach((page,pageIndex)=>{
-      const total=page.reduce((sum,system)=>sum+heightOf(system),0);
-      if(total)scale=Math.min(scale,(available(pageIndex)-(page.length-1)*minGap)/total);
+    const tallest=Math.max(0,...systems.map(heightOf));
+    if(tallest*scale>available(0))scale=available(0)/tallest;
+    const pages=[[]];
+    let used=0;
+    systems.forEach((system)=>{
+      const page=pages.at(-1),height=heightOf(system)*scale;
+      if(page.length&&(page.length>=perPage||used+minGap+height>available(pages.length-1))){pages.push([system]);used=height;return;}
+      used+=(page.length?minGap:0)+height;page.push(system);
     });
-    const averageHeight=systems.length?systems.reduce((sum,system)=>sum+heightOf(system),0)/systems.length:0;
-    const fullGaps=pages.map((page,pageIndex)=>page.length===perPage?(available(pageIndex)-page.reduce((sum,system)=>sum+heightOf(system),0)*scale)/(perPage-1):null).filter((gap)=>gap!==null);
-    const standardGap=Math.max(minGap,Math.min(90,fullGaps.length?fullGaps.reduce((a,b)=>a+b,0)/fullGaps.length:(available(1)-perPage*averageHeight*scale)/(perPage-1)));
+    const justifiedGap=(page,pageIndex)=>page.length>1?(available(pageIndex)-page.reduce((sum,system)=>sum+heightOf(system),0)*scale)/(page.length-1):0;
+    const fullGaps=pages.slice(0,-1).map(justifiedGap).filter((gap)=>gap>0);
+    const averageHeight=systems.length?systems.reduce((sum,system)=>sum+heightOf(system),0)/systems.length*scale:0;
+    const standardGap=Math.max(minGap,Math.min(90,fullGaps.length?fullGaps.reduce((a,b)=>a+b,0)/fullGaps.length:(available(1)-perPage*averageHeight)/(perPage-1)));
     const drawWidth=sourceWidth*scale, x=marginX+(contentWidth-drawWidth)/2;
     const doc=new jsPDF({unit:'pt',format:[pageWidth,pageHeight],compress:true});
     doc.setProperties({title:score.metadata.title||'score',author:score.metadata.composer||''});
     for(const [pageIndex,page] of pages.entries()) {
       if(pageIndex)doc.addPage([pageWidth,pageHeight]);
       if(!pageIndex&&hasMetadata){
-        drawPdfText(doc,score.metadata.title,pageWidth/2,pageHeight*.08,pageWidth*.032,{align:'center',bold:true});
-        drawPdfText(doc,score.metadata.lyricist,marginX,pageHeight*.13,pageWidth*.018);
-        drawPdfText(doc,score.metadata.composer,pageWidth-marginX,pageHeight*.13,pageWidth*.018,{align:'right'});
+        drawPdfText(doc,score.metadata.title,pageWidth/2,pageHeight*.075,pageWidth*.032,{align:'center',bold:true});
+        drawPdfText(doc,score.metadata.lyricist,marginX,pageHeight*.115,pageWidth*.018);
+        drawPdfText(doc,score.metadata.composer,pageWidth-marginX,pageHeight*.115,pageWidth*.018,{align:'right'});
       }else if(pageIndex){
         drawPdfText(doc,String(pageIndex+1),pageWidth-marginX,pageHeight*.035,pageWidth*.017,{align:'right'});
         if(score.metadata.title)drawPdfText(doc,score.metadata.title,marginX,pageHeight*.035,pageWidth*.015);
       }
-      const gap=page.length===perPage?(available(pageIndex)-page.reduce((sum,system)=>sum+heightOf(system),0)*scale)/(perPage-1):standardGap;
+      const lastPage=pageIndex===pages.length-1;
+      const gap=lastPage?Math.min(standardGap,page.length>1?justifiedGap(page,pageIndex):standardGap):justifiedGap(page,pageIndex);
       let y=pageIndex?normalTop:firstTop;
       for(const system of page){
         const clone=base.cloneNode(true);

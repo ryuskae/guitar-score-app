@@ -100,6 +100,9 @@ function setSelection(measure, voice, noteId = null, extend = false, source = 's
 function beginRangeSelection(event, measure, voice, noteId, source) {
   if (event.button !== 0) return;
   event.preventDefault();
+  // Touch and pen pointers are captured by the element they start on, so
+  // neighbouring notes would never see pointerenter during a drag.
+  if (event.pointerType !== 'mouse') try { event.target.releasePointerCapture?.(event.pointerId); } catch {}
   dragAnchor = { measure, voice, noteId, source };
   dragMoved = false;
   setSelection(measure, voice, noteId, false, source);
@@ -112,6 +115,16 @@ function extendRangeSelection(measure, voice, noteId) {
   updateControls();
   render();
 }
+
+// Finger and Apple Pencil drags: find the note under the pointer directly.
+document.addEventListener('pointermove', (event) => {
+  if (!dragAnchor || event.pointerType === 'mouse') return;
+  const hit = document.elementFromPoint(event.clientX, event.clientY);
+  if (!hit?.matches?.('rect.hit[data-note-id][data-measure]')) return;
+  const voice = Number(hit.dataset.voice);
+  if (voice !== dragAnchor.voice) return;
+  extendRangeSelection(Number(hit.dataset.measure), voice, hit.dataset.noteId);
+});
 
 document.addEventListener('pointerup', () => {
   hairpinDrag = null;
@@ -894,12 +907,11 @@ function openLyricEditor(ref) {
   score.selection={measure:ref.measure,voice:ref.voice,noteId:ref.noteId,source:'staff',cursorTick:notePosition(note,score.measures[ref.measure],ref.voice),rangeEnd:null};
   score.activeVoice=ref.voice;
   updateControls();render();
-  const input=$('#lyricInput'),rendered=renderedNotes.get(ref.noteId),matrix=notationSvg?.getScreenCTM?.();
-  if(!rendered||!matrix){closeLyricEditor();return;}
-  const lyricY=renderedLyricY.get(rendered.system)??rendered.noteY+40;
-  const point=new DOMPoint(rendered.x,lyricY-5).matrixTransform(matrix),sheetRect=sheet.getBoundingClientRect();
+  const input=$('#lyricInput'),rendered=renderedNotes.get(ref.noteId);
+  const point=rendered&&svgPointToSheet(rendered.x,(renderedLyricY.get(rendered.system)??rendered.noteY+40)-5);
+  if(!point){closeLyricEditor();return;}
   input.hidden=false;
-  input.style.left=`${point.x-sheetRect.left}px`;input.style.top=`${point.y-sheetRect.top}px`;
+  input.style.left=`${point.x}px`;input.style.top=`${point.y}px`;
   input.value=note.lyric?.text||'';
   input.focus({preventScroll:false});input.select();
   status.textContent='가사 입력: Space 다음 음표 · - 다음 음절과 하이픈 연결 · Backspace(빈 칸) 이전 음표 · Enter/Esc 끝내기';
@@ -1332,7 +1344,12 @@ function render() {
         svg('text',{x:x+measureWidth/2,y:staffTop-22,text:measureWarning.message,class:'measure-warning-text'});
       }
       const mh=svg('rect',{x,y:staffTop-10,width:measureWidth,height:lowerBottom-staffTop+20,class:'measure-hit'});
-      mh.addEventListener('click',(e)=>{if(e.target===mh)setSelection(index,score.activeVoice,null,e.shiftKey);});
+      mh.addEventListener('click',(e)=>{
+        if(e.target!==mh)return;
+        setSelection(index,score.activeVoice,null,e.shiftKey);
+        // A tapped measure offers copy/delete above it, like a range.
+        score.selection.measureTapped=true;render();
+      });
       if(measure.forceBreakAfter)svg('text',{x:x+measureWidth-14,y:staffTop-8,text:'↵',class:'break-mark'});
     });
     if(firstStaff&&firstLower)new VF.StaveConnector(firstStaff,firstLower).setType('bracket').setContext(context).draw();
@@ -1362,9 +1379,9 @@ function render() {
       actionAnchor={x:(firstLayout.x+right)/2,y:firstLayout.staffY-25,range:true};
     }
   }
-  if(!actionAnchor&&measureClipboard){
+  if(!actionAnchor&&(measureClipboard||score.selection.measureTapped)){
     const layout=layouts.get(score.selection.measure);
-    if(layout)actionAnchor={x:layout.x+layout.width/2,y:layout.staffY-25,range:false};
+    if(layout)actionAnchor={x:layout.x+layout.width/2,y:layout.staffY-25,range:!!score.selection.measureTapped&&!score.selection.noteId};
   }
   placeSelectionActions(actionAnchor);
   // Interaction rectangles are rebuilt from VexFlow's final, rhythm-aligned positions.
@@ -1983,16 +2000,26 @@ function deleteMeasures() {
 
 // Touch and iPad users get on-score buttons, because Safari often keeps
 // ⌘C/⌘V for itself instead of delivering the key presses to the page.
+// Maps notation coordinates to the sheet from the rendered size and the
+// viewBox, avoiding getScreenCTM, which Safari can misreport.
+function svgPointToSheet(x, y) {
+  if(!notationSvg)return null;
+  const rect=notationSvg.getBoundingClientRect(),sheetRect=sheet.getBoundingClientRect();
+  const [minX,minY,width]=(notationSvg.getAttribute('viewBox')||'0 0 1 1').trim().split(/\s+/).map(Number);
+  const scale=rect.width/(width||1);
+  if(!Number.isFinite(scale)||scale<=0)return null;
+  return {x:rect.left-sheetRect.left+(x-minX)*scale,y:rect.top-sheetRect.top+(y-minY)*scale,sheetWidth:sheetRect.width};
+}
+
 function placeSelectionActions(anchor) {
   const bar=$('#selectionActions');
-  const matrix=notationSvg?.getScreenCTM?.();
-  if(!anchor||lyricTarget||!matrix){bar.hidden=true;return;}
+  const point=anchor&&!lyricTarget?svgPointToSheet(anchor.x,anchor.y):null;
+  if(!point){bar.hidden=true;return;}
   $('#actionCopy').hidden=!anchor.range;$('#actionDelete').hidden=!anchor.range;
   $('#actionPaste').hidden=!measureClipboard;
-  const point=new DOMPoint(anchor.x,anchor.y).matrixTransform(matrix),sheetRect=sheet.getBoundingClientRect();
   bar.hidden=false;
-  bar.style.left=`${Math.max(70,Math.min(sheetRect.width-70,point.x-sheetRect.left))}px`;
-  bar.style.top=`${Math.max(40,point.y-sheetRect.top)}px`;
+  bar.style.left=`${Math.max(90,Math.min(point.sheetWidth-90,point.x))}px`;
+  bar.style.top=`${Math.max(48,point.y)}px`;
 }
 
 function copyMeasures() {

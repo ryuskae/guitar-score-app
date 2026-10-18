@@ -1339,12 +1339,15 @@ function render() {
     renderedSystemBreaks.push(Math.min(logicalHeight,top+(systemIndex+1)*systemHeight));
   });
   // A translucent range makes drag selection unambiguous before applying a barre.
+  let actionAnchor=null;
   if(score.selection.noteId&&score.selection.rangeEnd){
     let a=endpointFor({noteId:score.selection.noteId}),b=endpointFor(score.selection.rangeEnd);
     if(a&&b){
       if(a.system>b.system||(a.system===b.system&&a.x>b.x))[a,b]=[b,a];
       const bounds=new Map();for(const l of layouts.values()){const q=bounds.get(l.system)||{left:l.x,right:l.x+l.width,top:l.staffY-25,bottom:l.lowerBottom+12};q.left=Math.min(q.left,l.x);q.right=Math.max(q.right,l.x+l.width);bounds.set(l.system,q);}
       for(let s=a.system;s<=b.system;s++){const q=bounds.get(s),x1=s===a.system?a.x-13:q.left,x2=s===b.system?b.x+13:q.right;svg('rect',{x:x1,y:q.top,width:Math.max(4,x2-x1),height:q.bottom-q.top,class:'range-selection'});}
+      const firstBound=bounds.get(a.system);
+      actionAnchor={x:((a.x-13)+(a.system===b.system?b.x+13:firstBound.right))/2,y:firstBound.top,range:true};
     }
   }
   if(Number.isFinite(score.selection.measureRangeEnd)){
@@ -1353,7 +1356,17 @@ function render() {
       const layout=layouts.get(index);
       if(layout)svg('rect',{x:layout.x,y:layout.staffY-25,width:layout.width,height:layout.lowerBottom-layout.staffY+37,class:'range-selection'});
     }
+    const firstLayout=layouts.get(first),lastLayout=layouts.get(last);
+    if(firstLayout){
+      const right=lastLayout&&lastLayout.system===firstLayout.system?lastLayout.x+lastLayout.width:firstLayout.x+firstLayout.width;
+      actionAnchor={x:(firstLayout.x+right)/2,y:firstLayout.staffY-25,range:true};
+    }
   }
+  if(!actionAnchor&&measureClipboard){
+    const layout=layouts.get(score.selection.measure);
+    if(layout)actionAnchor={x:layout.x+layout.width/2,y:layout.staffY-25,range:false};
+  }
+  placeSelectionActions(actionAnchor);
   // Interaction rectangles are rebuilt from VexFlow's final, rhythm-aligned positions.
   selectionOrder().forEach(({note,measure,voice})=>{
     if(voice!==score.activeVoice)return;
@@ -1968,6 +1981,20 @@ function deleteMeasures() {
   status.textContent=`${count}개 마디를 삭제했습니다. Ctrl+Z(⌘Z)로 되돌릴 수 있습니다.`;
 }
 
+// Touch and iPad users get on-score buttons, because Safari often keeps
+// ⌘C/⌘V for itself instead of delivering the key presses to the page.
+function placeSelectionActions(anchor) {
+  const bar=$('#selectionActions');
+  const matrix=notationSvg?.getScreenCTM?.();
+  if(!anchor||lyricTarget||!matrix){bar.hidden=true;return;}
+  $('#actionCopy').hidden=!anchor.range;$('#actionDelete').hidden=!anchor.range;
+  $('#actionPaste').hidden=!measureClipboard;
+  const point=new DOMPoint(anchor.x,anchor.y).matrixTransform(matrix),sheetRect=sheet.getBoundingClientRect();
+  bar.hidden=false;
+  bar.style.left=`${Math.max(70,Math.min(sheetRect.width-70,point.x-sheetRect.left))}px`;
+  bar.style.top=`${Math.max(40,point.y-sheetRect.top)}px`;
+}
+
 function copyMeasures() {
   const [first,last]=selectedMeasureRange();
   const measures=score.measures.slice(first,last+1);
@@ -1978,6 +2005,7 @@ function copyMeasures() {
       .map((annotation)=>({...annotation,start:{...annotation.start,measure:annotation.start.measure-first},end:{...annotation.end,measure:annotation.end.measure-first}})),
   };
   measureClipboard=JSON.parse(JSON.stringify(measureClipboard));
+  render();
   status.textContent=first===last?`${measureLabel(first)}를 복사했습니다. 붙여 넣을 마디를 선택하고 Ctrl+V(⌘V)를 누르세요.`:`${measureLabel(first)}–${measureLabel(last)}를 복사했습니다. 붙여 넣을 마디를 선택하고 Ctrl+V(⌘V)를 누르세요.`;
 }
 
@@ -2755,6 +2783,15 @@ $('#barre').addEventListener('click', () => {
 });
 $('#undo').addEventListener('click', undo);
 $('#copyMeasures').addEventListener('click', copyMeasures);
+$('#selectionActions').addEventListener('pointerdown',(event)=>{event.preventDefault();event.stopPropagation();});
+$('#actionCopy').addEventListener('click',copyMeasures);
+$('#actionPaste').addEventListener('click',pasteMeasures);
+$('#actionDelete').addEventListener('click',deleteMeasures);
+// Clipboard events also arrive when a keyboard shortcut is turned into a
+// system copy/paste command instead of a keydown.
+const scoreClipboardTarget=(event)=>!lyricTarget&&!event.target?.matches?.('input,select,textarea')&&!document.querySelector('dialog[open]')&&!String(window.getSelection?.()||'');
+document.addEventListener('copy',(event)=>{if(!scoreClipboardTarget(event))return;event.preventDefault();copyMeasures();});
+document.addEventListener('paste',(event)=>{if(!scoreClipboardTarget(event))return;event.preventDefault();pasteMeasures();});
 $('#deleteMeasures').addEventListener('click', deleteMeasures);
 $('#newScore').addEventListener('click', newScore);
 $('#lyrics').addEventListener('click', startLyrics);

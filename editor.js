@@ -781,8 +781,8 @@ function scoreHasLyrics() {
   return score.measures.some((measure)=>measure.voices.some((voice)=>voice.some((note)=>note.lyric?.text)));
 }
 
-// Lyrics sit on one line under each system's staff. A syllable marked with a
-// hyphen is joined to the next syllable of its voice by centred dashes.
+// Lyrics sit on one line under each system's staff, with dashes for split
+// words and for syllables held over several notes.
 function drawLyrics(layouts) {
   const systemsBounds=new Map();
   for(const layout of layouts.values()){
@@ -814,19 +814,50 @@ function drawLyrics(layouts) {
     drawn.push({note,voice,rendered,y,left:rendered.x-width/2,right:rendered.x+width/2});
   });
   const dash=(x,y)=>svg('text',{x,y,text:'-',class:'lyric-hyphen','text-anchor':'middle','font-size':14,'font-family':font,fill:'#111'});
-  const dashes=(x1,x2,y)=>{
-    const gap=x2-x1;if(gap<4)return;
-    const count=Math.max(1,Math.floor(gap/70));
-    for(let index=1;index<=count;index++)dash(x1+gap*index/(count+1),y);
+  const drawnById=new Map(drawn.map((item)=>[item.note.id,item]));
+  // Two kinds of dashes: a hyphen between two syllables on neighbouring
+  // notes, and one dash under every note a syllable is held over (melisma)
+  // until the next syllable or rest. Words on neighbouring notes get none.
+  const joinSyllables=(item,next)=>{
+    if(next.rendered.system===item.rendered.system){
+      if(next.left-item.right>=4)dash((item.right+next.left)/2,item.y);
+      return;
+    }
+    dash(Math.min(item.right+10,systemsBounds.get(item.rendered.system).right-6),item.y);
+    dash(Math.max(systemsBounds.get(next.rendered.system).left+40,next.left-10),next.y);
   };
-  drawn.forEach((item,index)=>{
-    if(!item.note.lyric.hyphen)return;
-    const next=drawn.slice(index+1).find((candidate)=>candidate.voice===item.voice);
-    if(!next){dash(item.right+8,item.y);return;}
-    if(next.rendered.system===item.rendered.system){dashes(item.right,next.left,item.y);return;}
-    dashes(item.right,systemsBounds.get(item.rendered.system).right,item.y);
-    const nextBound=systemsBounds.get(next.rendered.system);
-    dashes(nextBound.left+40,next.left,next.y);
+  const holdDashes=(item,held,next)=>{
+    let previousRight=item.right,previousSystem=item.rendered.system;
+    held.forEach((rendered)=>{
+      const sameSystem=rendered.system===previousSystem;
+      const x=sameSystem?Math.max(rendered.x,previousRight+7):rendered.x;
+      const blocked=next&&next.rendered.system===rendered.system&&x>next.left-6;
+      if(!blocked){dash(x,renderedLyricY.get(rendered.system));previousRight=x+4;previousSystem=rendered.system;}
+    });
+  };
+  const voices=new Map();
+  selectionOrder().forEach((entry)=>{
+    if(entry.note.grace)return;
+    if(!voices.has(entry.voice))voices.set(entry.voice,[]);
+    voices.get(entry.voice).push(entry.note);
+  });
+  voices.forEach((notes)=>{
+    let holding=null,held=[];
+    const finish=(next)=>{
+      if(!holding)return;
+      if(held.length)holdDashes(holding,held,next);
+      else if(holding.note.lyric.hyphen){
+        if(next)joinSyllables(holding,next);else dash(holding.right+8,holding.y);
+      }
+    };
+    notes.forEach((note)=>{
+      const item=drawnById.get(note.id);
+      if(note.rest){finish(null);holding=null;held=[];return;}
+      if(item){finish(item);holding=item;held=[];return;}
+      const rendered=renderedNotes.get(note.id);
+      if(holding&&rendered)held.push(rendered);
+    });
+    finish(null);
   });
 }
 

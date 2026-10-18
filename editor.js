@@ -1,5 +1,5 @@
 import {
-  TUNING, createScore, createMeasure, noteFromStringFret,
+  TUNING, uid, createScore, createMeasure, noteFromStringFret,
   durationTicks, measureTicks, positionsForMidi, cloneScore, allNotes, timeSignatureTicks, groupingTicks,
 } from './editor-model.js';
 
@@ -34,6 +34,9 @@ let warningTimer = null;
 let selectedAnnotation = -1;
 let hairpinDrag = null;
 let lastTieShortcutAt = 0;
+let measureClipboard = null;
+let autosaveTimer = null;
+const AUTOSAVE_KEY = 'guitar-score-app:score';
 
 // Keyboard letters enter the lower guitar octave by default: C3–B3.
 const PITCH_BY_CODE = { KeyA: 57, KeyB: 59, KeyC: 48, KeyD: 50, KeyE: 52, KeyF: 53, KeyG: 55 };
@@ -69,6 +72,9 @@ function setSelection(measure, voice, noteId = null, extend = false, source = 's
   scoreSvg.focus?.({preventScroll:true});
   if (extend && score.selection.noteId) {
     score.selection.rangeEnd = { measure, voice, noteId };
+  } else if (extend && !noteId) {
+    if (measure === score.selection.measure) delete score.selection.measureRangeEnd;
+    else score.selection.measureRangeEnd = measure;
   } else {
     const targetMeasure=score.measures[measure];
     const targetNote=noteId?targetMeasure?.voices[voice]?.find((note)=>note.id===noteId):null;
@@ -458,33 +464,42 @@ function beamData(measure, voice) {
   }
   const beatLength = 8 * (4 / timeSignature.beatType);
   const compound = timeSignature.beatType === 8 && timeSignature.beats >= 6 && timeSignature.beats % 3 === 0;
-  // In 4/4, consecutive eighths conventionally read as 1–2 | 3–4:
-  // four eighths per beam.  Sixteenths still reveal every quarter-note beat.
-  const eighthGroupLength = timeSignature.beats === 4 && timeSignature.beatType === 4
-    ? beatLength * 2 : groupingTicks(timeSignature);
-  let tick = 0, current = [], groupIndex = null;
-  const flush = () => {
-    if (current.length > 1) {
-      current.forEach(({note}) => levels.set(note.id, 1));
-      groups.push(current);
-      // Every sixteenth in a primary group belongs to a second beam (a
-      // singleton gets a short secondary hook rather than a flag).
-      current.filter(({note}) => note.duration <= 2).forEach(({note}) => levels.set(note.id, 2));
-    }
-    current=[]; groupIndex=null;
-  };
+  const beatUnit = compound ? groupingTicks(timeSignature) : beatLength;
+  // Beam within each beat first. A note joins the group of the beat in which
+  // it starts; rests and quarter-or-longer notes break the beam.
+  const beatGroups = [];
+  let tick = 0, current = [], currentBeat = null;
+  const flush = () => { if (current.length) beatGroups.push({ beat:currentBeat, items:current }); current=[]; currentBeat=null; };
   for (const note of measure.voices[voice]) {
-    const groupLength = (note.duration <= 2 || current.some((item) => item.note.duration <= 2))
-      ? (compound ? groupingTicks(timeSignature) : beatLength) : eighthGroupLength;
-    const currentGroup=Math.floor(tick / groupLength);
-    if (note.rest || note.duration > 4 || (groupIndex !== null && currentGroup !== groupIndex)) flush();
-    if (!note.rest && note.duration <= 4) {
-      if (groupIndex === null) groupIndex=currentGroup;
-      current.push({note,tick});
-    }
-    tick += durationTicks(note);
+    if (note.grace) continue;
+    const start = Number.isFinite(note.startTick) ? note.startTick : tick;
+    const beat = Math.floor(start / beatUnit + .001);
+    if (note.rest || note.duration > 4 || (currentBeat !== null && beat !== currentBeat)) flush();
+    if (!note.rest && note.duration <= 4) { currentBeat = beat; current.push({note,tick:start}); }
+    tick = Math.max(tick, start + durationTicks(note));
   }
   flush();
+  // In 4/4, two beats of plain eighths read as 1–2 | 3–4: four eighths under
+  // one beam. Sixteenths keep every quarter-note beat visible.
+  const plainEighths = (group) => group.items.length === 2 && group.items.every(({note}) =>
+    note.duration === 4 && !(note.dots ?? (note.dotted ? 1 : 0)) && !note.tuplet);
+  const fourFour = timeSignature.beats === 4 && timeSignature.beatType === 4;
+  const merged = [];
+  beatGroups.forEach((group) => {
+    const previous = merged.at(-1);
+    if (fourFour && previous && previous.beat % 2 === 0 && group.beat === previous.beat + 1 && previous.lastBeat === previous.beat
+      && plainEighths(previous) && plainEighths(group)) {
+      previous.items = [...previous.items, ...group.items]; previous.lastBeat = group.beat;
+    } else merged.push({ ...group, lastBeat:group.beat });
+  });
+  merged.forEach(({items}) => {
+    if (items.length < 2) return;
+    items.forEach(({note}) => levels.set(note.id, 1));
+    groups.push(items);
+    // Every sixteenth in a primary group belongs to a second beam (a
+    // singleton gets a short secondary hook rather than a flag).
+    items.filter(({note}) => note.duration <= 2).forEach(({note}) => levels.set(note.id, 2));
+  });
   return { levels, groups };
 }
 
@@ -775,7 +790,28 @@ function measureLayoutWeight(measure) {
   return Math.max(1.5,content+barlineCost);
 }
 
+function scheduleAutosave() {
+  clearTimeout(autosaveTimer);
+  autosaveTimer=setTimeout(saveToBrowser,300);
+}
+
+// The score survives reloads and back/forward navigation in this browser.
+function saveToBrowser() {
+  clearTimeout(autosaveTimer);
+  try{localStorage.setItem(AUTOSAVE_KEY,JSON.stringify(score));}catch{}
+}
+
+function restoreFromBrowser() {
+  try{
+    const saved=JSON.parse(localStorage.getItem(AUTOSAVE_KEY)||'null');
+    if(!saved||!Array.isArray(saved.measures)||!saved.measures.length)return;
+    const base=createScore();
+    score={...base,...saved,metadata:{...base.metadata,...saved.metadata},selection:{...base.selection,...saved.selection}};
+  }catch{}
+}
+
 function render() {
+  scheduleAutosave();
   ensureEditableRests();
   scoreSvg.replaceChildren();
   notationSvg=null;
@@ -1010,6 +1046,13 @@ function render() {
       if(a.system>b.system||(a.system===b.system&&a.x>b.x))[a,b]=[b,a];
       const bounds=new Map();for(const l of layouts.values()){const q=bounds.get(l.system)||{left:l.x,right:l.x+l.width,top:l.staffY-25,bottom:l.lowerBottom+12};q.left=Math.min(q.left,l.x);q.right=Math.max(q.right,l.x+l.width);bounds.set(l.system,q);}
       for(let s=a.system;s<=b.system;s++){const q=bounds.get(s),x1=s===a.system?a.x-13:q.left,x2=s===b.system?b.x+13:q.right;svg('rect',{x:x1,y:q.top,width:Math.max(4,x2-x1),height:q.bottom-q.top,class:'range-selection'});}
+    }
+  }
+  if(Number.isFinite(score.selection.measureRangeEnd)){
+    const [first,last]=selectedMeasureRange();
+    for(let index=first;index<=last;index++){
+      const layout=layouts.get(index);
+      if(layout)svg('rect',{x:layout.x,y:layout.staffY-25,width:layout.width,height:layout.lowerBottom-layout.staffY+37,class:'range-selection'});
     }
   }
   // Interaction rectangles are rebuilt from VexFlow's final, rhythm-aligned positions.
@@ -1495,6 +1538,85 @@ function insertMeasureAfterSelection() {
   render();
 }
 
+function selectedMeasureRange() {
+  const s=score.selection;
+  const ends=[s.measure,s.rangeEnd?.measure,s.measureRangeEnd].filter(Number.isFinite);
+  return [Math.max(0,Math.min(...ends)),Math.min(score.measures.length-1,Math.max(...ends))];
+}
+
+// Shift+←/→ grows the selection: note by note when a note is selected,
+// otherwise measure by measure.
+function extendSelectionByKeyboard(direction) {
+  const s=score.selection;
+  if(s.noteId){
+    const ordered=selectionOrder().filter((entry)=>entry.voice===s.voice);
+    const currentId=s.rangeEnd?.noteId??s.noteId;
+    const index=ordered.findIndex((entry)=>entry.note.id===currentId);
+    const next=ordered[Math.max(0,Math.min(ordered.length-1,index+direction))];
+    if(index<0||!next)return;
+    s.rangeEnd=next.note.id===s.noteId?null:{measure:next.measure,voice:next.voice,noteId:next.note.id};
+  }else{
+    const end=Math.max(0,Math.min(score.measures.length-1,(s.measureRangeEnd??s.measure)+direction));
+    if(end===s.measure)delete s.measureRangeEnd;else s.measureRangeEnd=end;
+  }
+  updateControls();render();
+}
+
+function copyMeasures() {
+  const [first,last]=selectedMeasureRange();
+  const measures=score.measures.slice(first,last+1);
+  const ids=new Set(measures.flatMap((measure)=>measure.voices.flat().map((note)=>note.id)));
+  measureClipboard={
+    measures:measures.map((measure)=>({voices:measure.voices,directions:measure.directions||[],deletedVoices:measure.deletedVoices||[],limit:measureLimit(measure)})),
+    annotations:score.annotations.filter((annotation)=>ids.has(annotation.start?.noteId)&&ids.has(annotation.end?.noteId))
+      .map((annotation)=>({...annotation,start:{...annotation.start,measure:annotation.start.measure-first},end:{...annotation.end,measure:annotation.end.measure-first}})),
+  };
+  measureClipboard=JSON.parse(JSON.stringify(measureClipboard));
+  status.textContent=first===last?`${measureLabel(first)}를 복사했습니다. 붙여 넣을 마디를 선택하고 Ctrl+V(⌘V)를 누르세요.`:`${measureLabel(first)}–${measureLabel(last)}를 복사했습니다. 붙여 넣을 마디를 선택하고 Ctrl+V(⌘V)를 누르세요.`;
+}
+
+// Pasting overwrites measures from the selected one onward, adding measures
+// at the end of the score when needed.
+function pasteMeasures() {
+  if(!measureClipboard){status.textContent='먼저 마디를 선택하고 Ctrl+C(⌘C)로 복사하세요.';return;}
+  remember();
+  const target=Math.max(0,Math.min(score.measures.length-1,score.selection.measure));
+  const copy=JSON.parse(JSON.stringify(measureClipboard));
+  const idMap=new Map();
+  copy.measures.forEach((source,offset)=>{
+    const index=target+offset;
+    while(score.measures.length<=index)score.measures.push(createMeasure());
+    const measure=score.measures[index];
+    removeAnnotationsForNotes(new Set(measure.voices.flat().map((note)=>note.id)));
+    measure.voices=source.voices.map((voice)=>voice.map((note)=>{
+      const id=uid('note');idMap.set(note.id,id);return {...note,id};
+    }));
+    while(measure.voices.length<4)measure.voices.push([]);
+    measure.directions=source.directions;
+    if(source.deletedVoices.length)measure.deletedVoices=source.deletedVoices;else delete measure.deletedVoices;
+    if(Math.abs(source.limit-measureLimit(measure))>.001)measure.voices.forEach((voice,voiceIndex)=>{
+      if(!voice.length)return;
+      materializeVoiceTicks(measure,voiceIndex);normalizeVoiceToMeasure(measure,voiceIndex);rebuildVoiceRests(measure,voiceIndex);
+    });
+    score.voiceCount=Math.max(score.voiceCount||1,...measure.voices.map((voice,voiceIndex)=>voice.length?voiceIndex+1:0));
+  });
+  const present=new Set(score.measures.flatMap((measure)=>measure.voices.flat().map((note)=>note.id)));
+  copy.annotations.forEach((annotation)=>{
+    const start={...annotation.start,measure:annotation.start.measure+target,noteId:idMap.get(annotation.start.noteId)};
+    const end={...annotation.end,measure:annotation.end.measure+target,noteId:idMap.get(annotation.end.noteId)};
+    if(present.has(start.noteId)&&present.has(end.noteId))score.annotations.push({...annotation,start,end});
+  });
+  const last=target+copy.measures.length-1;
+  score.selection={measure:target,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:0,rangeEnd:null,...(last>target?{measureRangeEnd:last}:{})};
+  updateControls();render();
+  status.textContent=`${copy.measures.length}개 마디를 붙여 넣었습니다.`;
+}
+
+function undo() {
+  if(!undoStack.length)return;
+  score=undoStack.pop();syncMetadataInputs();updateControls();render();
+}
+
 function selectedPickupTimeSignature() {
   const [beats,beatType]=$('#pickupTimeSignature').value.split('/').map(Number);
   return {beats,beatType};
@@ -1653,13 +1775,142 @@ function scoreImage() {
   });
 }
 
+function pdfFileName() {
+  return `${(score.metadata.title||'score').replace(/[\\/:*?"<>|]+/g,'_')}.pdf`;
+}
+
+// Systems are never split across pages: each page ends on a system boundary.
+function pdfPageSlices(sourceHeight, firstCapacity, normalCapacity, systemBreaks) {
+  const slices=[];
+  let sourceY=0, first=true;
+  while(sourceY<sourceHeight-.5) {
+    const maximum=Math.min(sourceHeight,sourceY+(first?firstCapacity:normalCapacity));
+    const boundary=systemBreaks.filter((value)=>value>sourceY+.5&&value<=maximum+.5).at(-1)||maximum;
+    slices.push({sourceY,height:Math.max(.5,boundary-sourceY),first});
+    sourceY=boundary; first=false;
+  }
+  if(!slices.length) slices.push({sourceY:0,height:sourceHeight,first:true});
+  return slices;
+}
+
+const PDF_LATIN_TEXT=/^[\x20-\x7E\u00A0-\u00FF]*$/;
+
+function pdfFontFamily(cssFamily='') {
+  return /arial|helvetica|sans|gothic|고딕/i.test(cssFamily)?'helvetica':'times';
+}
+
+// Text outside the PDF standard fonts (Korean, symbols) is drawn as a sharp
+// high-resolution image; everything else stays vector.
+function rasterText(text, font, sizePx, scale=8) {
+  const canvas=document.createElement('canvas'),ctx=canvas.getContext('2d');
+  ctx.font=font.replace('{size}',`${sizePx*scale}px`);
+  const width=Math.max(1,Math.ceil(ctx.measureText(text).width)),height=Math.ceil(sizePx*scale*1.4);
+  canvas.width=width+scale*2;canvas.height=height;
+  ctx.font=font.replace('{size}',`${sizePx*scale}px`);ctx.fillStyle='#111';ctx.textBaseline='alphabetic';
+  ctx.fillText(text,scale,sizePx*scale*1.05);
+  return {url:canvas.toDataURL('image/png'),width:canvas.width/scale,height:canvas.height/scale,ascent:sizePx*1.05,padding:1};
+}
+
+function drawPdfText(doc, text, x, y, size, {align='left',bold=false,cssFamily=score.textFont||'Georgia, serif'}={}) {
+  if(!text)return;
+  if(PDF_LATIN_TEXT.test(text)){
+    doc.setFont(pdfFontFamily(cssFamily),bold?'bold':'normal');doc.setFontSize(size);doc.setTextColor(17,17,17);
+    doc.text(text,x,y,{align});return;
+  }
+  const image=rasterText(text,`${bold?'bold ':''}{size} ${cssFamily}`,size);
+  const left=align==='center'?x-image.width/2:align==='right'?x-image.width:x-image.padding;
+  doc.addImage(image.url,'PNG',left,y-image.ascent,image.width,image.height);
+}
+
+function vectorScoreClone() {
+  const clone=notationSvg.cloneNode(true);
+  clone.setAttribute('xmlns', NS);
+  const liveTexts=[...notationSvg.querySelectorAll('text')],cloneTexts=[...clone.querySelectorAll('text')];
+  cloneTexts.forEach((node,index)=>{
+    const live=liveTexts[index],text=node.textContent||'';
+    if(node.matches('.break-mark,.measure-warning-text')||!text.trim()){node.remove();return;}
+    const style=getComputedStyle(live);
+    if(!PDF_LATIN_TEXT.test(text)){
+      const box=live.getBBox(),size=parseFloat(style.fontSize)||14;
+      const image=rasterText(text,`${style.fontStyle} ${style.fontWeight} {size} ${style.fontFamily}`,size);
+      const anchor=live.getAttribute('text-anchor')||style.textAnchor;
+      const x=Number(live.getAttribute('x'))||box.x,y=Number(live.getAttribute('y'))||box.y+box.height;
+      const left=anchor==='middle'?x-image.width/2:anchor==='end'?x-image.width:x-image.padding;
+      const replacement=document.createElementNS(NS,'image');
+      Object.entries({x:left,y:y-image.ascent,width:image.width,height:image.height,href:image.url}).forEach(([key,value])=>replacement.setAttribute(key,value));
+      node.replaceWith(replacement);return;
+    }
+    node.setAttribute('font-family',pdfFontFamily(style.fontFamily));
+    node.setAttribute('font-size',style.fontSize);
+    node.setAttribute('font-weight',Number(style.fontWeight)>=600||style.fontWeight==='bold'?'bold':'normal');
+    node.setAttribute('font-style',style.fontStyle==='italic'?'italic':'normal');
+    node.setAttribute('fill','#111');
+    const inline=node.getAttribute('style');
+    if(inline)node.setAttribute('style',inline.replace(/font[^;]*;?/g,''));
+  });
+  clone.querySelectorAll('.hit,.measure-hit,.selected-measure,.hairpin-handle,.range-selection,.measure-warning-bg').forEach((node)=>node.remove());
+  clone.querySelectorAll('*').forEach((node)=>{
+    for(const attr of ['fill','stroke','style']){
+      const value=node.getAttribute(attr);if(!value)continue;
+      node.setAttribute(attr,value.replaceAll('#aeb4bf','#111').replaceAll('#2368c4','#111').replaceAll('#b33a3a','#111').replaceAll('#15805f','#111').replaceAll('#d97706','#111'));
+    }
+  });
+  const style=document.createElementNS(NS,'style');
+  style.textContent='.slur,.tie,.ending-line{fill:none;stroke:#111;stroke-width:1.5}.barre{fill:none;stroke:#111;stroke-width:1.2;stroke-dasharray:5 4}';
+  clone.prepend(style);
+  return clone;
+}
+
+// Vector PDF: notation stays as paths, so it prints sharply at any zoom.
 async function exportPdf() {
-  const preview=window.open('', '_blank');
-  if (preview) preview.document.write('<p style="font-family:sans-serif;padding:24px">PDF를 만드는 중입니다…</p>');
+  const jsPDF=window.jspdf?.jsPDF;
+  if(!jsPDF||!window.svg2pdf?.svg2pdf)return exportRasterPdf();
+  const holder=document.createElement('div');
+  holder.style.cssText='position:fixed;left:-10000px;top:0;width:10px;height:10px;overflow:hidden;';
+  document.body.appendChild(holder);
+  try {
+    const sizes={A4:[595.28,841.89],A3:[841.89,1190.55],Letter:[612,792],Screen:[595.28,841.89]};
+    const [pageWidth,pageHeight]=sizes[score.page]||sizes.A4;
+    const clone=vectorScoreClone();
+    holder.appendChild(clone);
+    const [, , sourceWidth, sourceHeight]=notationSvg.getAttribute('viewBox').trim().split(/\s+/).map(Number);
+    const margin=pageWidth*.065, contentWidth=pageWidth-margin*2, scale=contentWidth/sourceWidth;
+    const hasMetadata=Object.values(score.metadata).some(Boolean);
+    const firstTop=hasMetadata?pageHeight*.12:margin, normalTop=margin;
+    const slices=pdfPageSlices(sourceHeight,(pageHeight-firstTop-margin)/scale,(pageHeight-normalTop-margin)/scale,[...renderedSystemBreaks]);
+    const doc=new jsPDF({unit:'pt',format:[pageWidth,pageHeight],compress:true});
+    doc.setProperties({title:score.metadata.title||'score',author:score.metadata.composer||''});
+    for(const [pageIndex,slice] of slices.entries()) {
+      if(pageIndex)doc.addPage([pageWidth,pageHeight]);
+      if(slice.first&&hasMetadata){
+        drawPdfText(doc,score.metadata.title,pageWidth/2,pageHeight*.05,pageWidth*.035*.82,{align:'center',bold:true});
+        drawPdfText(doc,score.metadata.lyricist,margin,pageHeight*.085,pageWidth*.018*.82);
+        drawPdfText(doc,score.metadata.composer,pageWidth-margin,pageHeight*.085,pageWidth*.018*.82,{align:'right'});
+      }else if(!slice.first&&score.metadata.title){
+        drawPdfText(doc,String(pageIndex+1),margin,pageHeight*.027,pageWidth*.015*.82);
+        drawPdfText(doc,score.metadata.title,margin+pageWidth*.035,pageHeight*.027,pageWidth*.015*.82);
+      }
+      const top=slice.first?firstTop:normalTop;
+      clone.setAttribute('viewBox',`0 ${slice.sourceY} ${sourceWidth} ${slice.height}`);
+      clone.setAttribute('width',sourceWidth);clone.setAttribute('height',slice.height);
+      doc.saveGraphicsState();
+      doc.rect(margin,top,contentWidth,slice.height*scale,null);doc.clip();doc.discardPath();
+      await window.svg2pdf.svg2pdf(clone,doc,{x:margin,y:top,width:contentWidth,height:slice.height*scale});
+      doc.restoreGraphicsState();
+    }
+    download(pdfFileName(),doc.output("blob"),"application/pdf");
+  } catch(error) {
+    alert(`PDF 생성 중 문제가 생겼습니다: ${error.message}`);
+  } finally {
+    holder.remove();
+  }
+}
+
+async function exportRasterPdf() {
   try {
     const sizes={
-      A4:{px:[992,1403],pt:[595.28,841.89]}, A3:{px:[1403,1984],pt:[841.89,1190.55]},
-      Letter:{px:[1020,1320],pt:[612,792]}, Screen:{px:[992,1403],pt:[595.28,841.89]},
+      A4:{px:[1984,2806],pt:[595.28,841.89]}, A3:{px:[2806,3968],pt:[841.89,1190.55]},
+      Letter:{px:[2040,2640],pt:[612,792]}, Screen:{px:[1984,2806],pt:[595.28,841.89]},
     };
     const page=sizes[score.page]||sizes.A4;
     const [canvasWidth,canvasHeight]=page.px;
@@ -1702,12 +1953,8 @@ async function exportPdf() {
       jpegs.push(jpegBytes(canvas.toDataURL('image/jpeg',.94)));
     }
     const pdf=buildPdf(jpegs,page.pt[0],page.pt[1],canvasWidth,canvasHeight);
-    const url=URL.createObjectURL(new Blob([pdf],{type:'application/pdf'}));
-    if(preview) preview.location.replace(url);
-    else { const link=document.createElement('a');link.href=url;link.target='_blank';link.rel='noopener';link.click(); }
-    setTimeout(()=>URL.revokeObjectURL(url),120000);
+    download(pdfFileName(),pdf,'application/pdf');
   } catch(error) {
-    if(preview) preview.close();
     alert(`PDF 생성 중 문제가 생겼습니다: ${error.message}`);
   }
 }
@@ -2079,7 +2326,10 @@ $('#barre').addEventListener('click', () => {
   const value=$('#barreFret').value;
   remember();score.annotations.push({type:'barre',...range,text:`C.${Math.max(1,Math.min(20,Number(value)||1))}`});render();
 });
-$('#undo').addEventListener('click', () => { if(!undoStack.length)return;score=undoStack.pop();syncMetadataInputs();updateControls();render(); });
+$('#undo').addEventListener('click', undo);
+$('#copyMeasures').addEventListener('click', copyMeasures);
+$('#pasteMeasures').addEventListener('click', pasteMeasures);
+window.addEventListener('pagehide', saveToBrowser);
 $('#clear').addEventListener('click', () => { remember();score.measures=[createMeasure()];score.annotations=[];score.selection={measure:0,voice:score.activeVoice,noteId:null,source:'staff',cursorTick:0,rangeEnd:null};render(); });
 $('#page').addEventListener('change', (e) => { score.page=e.target.value;render(); });
 $('#instrument').addEventListener('change', (e) => { score.instrument=e.target.value;updateControls();render(); });
@@ -2122,6 +2372,12 @@ window.addEventListener('keyup',handleTieShortcut,true);
 
 document.addEventListener('keydown', (e) => {
   if (e.target?.matches?.('input,select,textarea') || $('#helpDialog').open) return;
+  if(e.ctrlKey||e.metaKey){
+    if(e.code==='KeyC'){e.preventDefault();copyMeasures();return;}
+    if(e.code==='KeyV'){e.preventDefault();pasteMeasures();return;}
+    if(e.code==='KeyZ'&&!e.shiftKey){e.preventDefault();undo();return;}
+    if(e.code!=='ArrowUp'&&e.code!=='ArrowDown')return;
+  }
   if(e.code==='Equal'||e.key==='='){e.preventDefault();applyAccidental(1);return;}
   if(e.code==='Minus'||e.key==='-'){e.preventDefault();applyAccidental(-1);return;}
   if(e.code==='BracketLeft'||e.key==='['){e.preventDefault();toggleRepeat('repeatStart');return;}
@@ -2141,6 +2397,9 @@ document.addEventListener('keydown', (e) => {
     if(durationByDigit[digit]){e.preventDefault();changeSelectedDuration(durationByDigit[digit]);return;}
   }
   if(e.code==='Tab'){e.preventDefault();insertMeasureAfterSelection();return;}
+  if ((e.code === 'ArrowLeft' || e.code === 'ArrowRight') && e.shiftKey) {
+    e.preventDefault();extendSelectionByKeyboard(e.code==='ArrowLeft'?-1:1);return;
+  }
   if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
     e.preventDefault();
     if(score.selection.noteId)moveSelection(e.code==='ArrowLeft'?-1:1);
@@ -2160,7 +2419,7 @@ document.addEventListener('keydown', (e) => {
   }
   else if (e.code === 'KeyV') { e.preventDefault();$('#voice').click(); }
   else if (e.code === 'Delete' || e.code === 'Backspace' || e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault();deleteSelected(); }
-  else if (e.code === 'Escape') { score.selection.rangeEnd=null;render(); }
+  else if (e.code === 'Escape') { score.selection.rangeEnd=null;delete score.selection.measureRangeEnd;render(); }
 });
 
 document.querySelectorAll('.tool-group').forEach((group)=>{
@@ -2204,6 +2463,7 @@ toolbar.addEventListener('pointerover',(event)=>showCompactToolTip(event.target.
 toolbar.addEventListener('pointerdown',(event)=>showCompactToolTip(event.target.closest('[data-tooltip]')),{capture:true});
 toolbar.addEventListener('focusin',(event)=>showCompactToolTip(event.target.closest('[data-tooltip]')));
 
+restoreFromBrowser();
 syncMetadataInputs(); updateControls(); render();
 
 export { score, toMusicXml, importMusicXml, pitchY, writtenMidi, buildPdf };

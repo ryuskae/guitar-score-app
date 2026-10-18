@@ -1161,7 +1161,10 @@ function render() {
   $('#printComposer').textContent = score.metadata.composer || '';
   sheet.style.setProperty('--score-text-font',score.textFont||'Georgia, serif');
   sheet.dataset.page = score.page;
-  const baseWidth = score.page === 'Screen' ? 1100 : score.page === 'A3' ? 1000 : 720;
+  // Paper layouts use the staff-to-page proportion of engraved guitar books
+  // (about 100 staff spaces across four measures), so a page holds four
+  // systems; the screen layout stays roomier.
+  const baseWidth = score.page === 'Screen' ? 1100 : 900;
   const densityScale=Math.max(1,(Number(score.measuresPerSystem)||3)/3);
   const width = baseWidth*densityScale;
   const sys = systems();
@@ -2318,8 +2321,31 @@ function pdfPageSlices(sourceHeight, firstCapacity, normalCapacity, systemBreaks
 
 const PDF_LATIN_TEXT=/^[\x20-\x7E\u00A0-\u00FF]*$/;
 
+// Century Schoolbook L (the face of LilyPond-engraved guitar books) is
+// embedded in the PDF for TAB digits, numbers and Latin text when loaded.
+const PDF_SERIF_FONT='CenturySchL';
+let pdfSerifFonts=null;
+async function embedPdfSerifFont(doc) {
+  try{
+    if(!pdfSerifFonts){
+      const files={normal:'Roma',bold:'Bold',italic:'Ital',bolditalic:'BoldItal'};
+      pdfSerifFonts=await Promise.all(Object.entries(files).map(async([style,name])=>{
+        const response=await fetch(`./fonts/century-schoolbook-l/CenturySchL-${name}.ttf`);
+        if(!response.ok)throw new Error(response.statusText);
+        const bytes=new Uint8Array(await response.arrayBuffer());
+        let binary='';for(let index=0;index<bytes.length;index+=0x8000)binary+=String.fromCharCode(...bytes.subarray(index,index+0x8000));
+        return {style,file:`CenturySchL-${name}.ttf`,data:btoa(binary)};
+      }));
+    }
+    pdfSerifFonts.forEach(({style,file,data})=>{doc.addFileToVFS(file,data);doc.addFont(file,PDF_SERIF_FONT,style);});
+    return true;
+  }catch{pdfSerifFonts=null;return false;}
+}
+
+let pdfSerifAvailable=false;
 function pdfFontFamily(cssFamily='') {
-  return /arial|helvetica|sans|gothic|고딕/i.test(cssFamily)?'helvetica':'times';
+  if(/arial|helvetica|sans|gothic|고딕/i.test(cssFamily))return 'helvetica';
+  return pdfSerifAvailable?PDF_SERIF_FONT:'times';
 }
 
 // Text outside the PDF standard fonts (Korean, symbols) is drawn as a sharp
@@ -2397,7 +2423,7 @@ const PDF_HIDDEN_CLASSES=['hit','measure-hit','selected-measure','hairpin-handle
 // of its box) and measures each system's real vertical extent.
 function tagPdfSystems() {
   const cores=[...renderedSystemCores];
-  const systems=cores.map(()=>({top:Infinity,bottom:-Infinity}));
+  const systems=cores.map(()=>({top:Infinity,bottom:-Infinity,left:Infinity,right:-Infinity}));
   // Marks drawn after the systems (slurs, lyrics, dynamics) belong to the
   // system whose staves are nearest to them.
   const nearestSystem=(centre)=>cores.reduce((best,core,index)=>{
@@ -2413,6 +2439,8 @@ function tagPdfSystems() {
     if(PDF_HIDDEN_CLASSES.some((name)=>node.classList?.contains(name))||(!box.width&&!box.height))return;
     systems[index].top=Math.min(systems[index].top,box.y);
     systems[index].bottom=Math.max(systems[index].bottom,box.y+box.height);
+    systems[index].left=Math.min(systems[index].left,box.x);
+    systems[index].right=Math.max(systems[index].right,box.x+box.width);
   });
   return systems.map((system,index)=>({index,...system})).filter((system)=>Number.isFinite(system.top));
 }
@@ -2438,19 +2466,24 @@ async function exportPdf() {
     await loadPdfFonts();
     const sizes={A4:[595.28,841.89],A3:[841.89,1190.55],Letter:[612,792],Screen:[595.28,841.89]};
     const [pageWidth,pageHeight]=sizes[score.page]||sizes.A4;
+    const doc=new jsPDF({unit:'pt',format:[pageWidth,pageHeight],compress:true});
+    doc.setProperties({title:score.metadata.title||'score',author:score.metadata.composer||''});
+    pdfSerifAvailable=await embedPdfSerifFont(doc);
+    const serif=pdfSerifAvailable?PDF_SERIF_FONT:'times';
     const systems=tagPdfSystems();
     const base=vectorScoreClone();
-    const [, , sourceWidth]=notationSvg.getAttribute('viewBox').trim().split(/\s+/).map(Number);
-    // Score width follows the page (8% side margins, as in engraved guitar
-    // books) and is never shrunk to squeeze systems in; each page takes as
-    // many systems as fit, at most four, spread evenly down the page.
+    // Systems are cropped to the drawn notation (bracket to final barline),
+    // so the 8% side margins are measured from the music itself and title
+    // credits line up with the system edges, as in engraved guitar books.
     const marginX=pageWidth*.08, contentWidth=pageWidth-marginX*2;
+    const pad=4, cropLeft=Math.min(...systems.map((system)=>system.left))-pad;
+    const cropWidth=Math.max(...systems.map((system)=>system.right))+pad-cropLeft;
     const hasMetadata=Object.values(score.metadata).some(Boolean);
-    const normalTop=pageHeight*.06, bottomMargin=pageHeight*.06, firstTop=hasMetadata?pageHeight*.15:normalTop;
-    const perPage=4, minGap=16, pad=4;
+    const normalTop=pageHeight*.09, bottomMargin=pageHeight*.06, firstTop=hasMetadata?pageHeight*.175:normalTop;
+    const perPage=4, minGap=16;
     const heightOf=(system)=>system.bottom-system.top+pad*2;
     const available=(pageIndex)=>pageHeight-(pageIndex?normalTop:firstTop)-bottomMargin;
-    let scale=contentWidth/sourceWidth;
+    let scale=contentWidth/cropWidth;
     const tallest=Math.max(0,...systems.map(heightOf));
     if(tallest*scale>available(0))scale=available(0)/tallest;
     const pages=[[]];
@@ -2464,18 +2497,18 @@ async function exportPdf() {
     const fullGaps=pages.slice(0,-1).map(justifiedGap).filter((gap)=>gap>0);
     const averageHeight=systems.length?systems.reduce((sum,system)=>sum+heightOf(system),0)/systems.length*scale:0;
     const standardGap=Math.max(minGap,Math.min(90,fullGaps.length?fullGaps.reduce((a,b)=>a+b,0)/fullGaps.length:(available(1)-perPage*averageHeight)/(perPage-1)));
-    const drawWidth=sourceWidth*scale, x=marginX+(contentWidth-drawWidth)/2;
-    const doc=new jsPDF({unit:'pt',format:[pageWidth,pageHeight],compress:true});
-    doc.setProperties({title:score.metadata.title||'score',author:score.metadata.composer||''});
+    const drawWidth=cropWidth*scale, x=marginX+(contentWidth-drawWidth)/2;
+    const left=x, right=x+drawWidth;
     for(const [pageIndex,page] of pages.entries()) {
       if(pageIndex)doc.addPage([pageWidth,pageHeight]);
+      drawPdfText(doc,String(pageIndex+1),right,pageHeight*.067,pageWidth*.02,{align:'right'});
       if(!pageIndex&&hasMetadata){
-        drawPdfText(doc,score.metadata.title,pageWidth/2,pageHeight*.075,pageWidth*.032,{align:'center',bold:true});
-        drawPdfText(doc,score.metadata.lyricist,marginX,pageHeight*.115,pageWidth*.018);
-        drawPdfText(doc,score.metadata.composer,pageWidth-marginX,pageHeight*.115,pageWidth*.018,{align:'right'});
-      }else if(pageIndex){
-        drawPdfText(doc,String(pageIndex+1),pageWidth-marginX,pageHeight*.035,pageWidth*.017,{align:'right'});
-        if(score.metadata.title)drawPdfText(doc,score.metadata.title,marginX,pageHeight*.035,pageWidth*.015);
+        drawPdfText(doc,score.metadata.title,pageWidth/2,pageHeight*.115,pageWidth*.034,{align:'center'});
+        const creditY=firstTop-pageHeight*.012;
+        drawPdfText(doc,score.metadata.lyricist,left,creditY,pageWidth*.019);
+        drawPdfText(doc,score.metadata.composer,right,creditY,pageWidth*.019,{align:'right'});
+      }else if(pageIndex&&score.metadata.title){
+        drawPdfText(doc,score.metadata.title,left,pageHeight*.067,pageWidth*.016);
       }
       const lastPage=pageIndex===pages.length-1;
       const gap=lastPage?Math.min(standardGap,page.length>1?justifiedGap(page,pageIndex):standardGap):justifiedGap(page,pageIndex);
@@ -2484,10 +2517,10 @@ async function exportPdf() {
         const clone=base.cloneNode(true);
         clone.querySelectorAll('[data-pdf-system]').forEach((node)=>{if(Number(node.getAttribute('data-pdf-system'))!==system.index)node.remove();});
         const height=heightOf(system);
-        clone.setAttribute('viewBox',`0 ${system.top-pad} ${sourceWidth} ${height}`);
-        clone.setAttribute('width',sourceWidth);clone.setAttribute('height',height);
+        clone.setAttribute('viewBox',`${cropLeft} ${system.top-pad} ${cropWidth} ${height}`);
+        clone.setAttribute('width',cropWidth);clone.setAttribute('height',height);
         holder.replaceChildren(clone);
-        doc.setFont('times','normal');
+        doc.setFont(serif,'normal');
         await window.svg2pdf.svg2pdf(clone,doc,{x,y,width:drawWidth,height:height*scale});
         y+=height*scale+gap;
       }

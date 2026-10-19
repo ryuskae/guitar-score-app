@@ -1403,7 +1403,12 @@ function render() {
       });
       if(measure.forceBreakAfter)svg('text',{x:x+measureWidth-14,y:staffTop-8,text:'↵',class:'break-mark'});
     });
-    if(firstStaff&&firstLower)new VF.StaveConnector(firstStaff,firstLower).setType('bracket').setContext(context).draw();
+    // Staff and TAB (or the piano's two staves) are joined like a grand
+    // staff: a curved brace and a line through the start of both staves.
+    if(firstStaff&&firstLower){
+      new VF.StaveConnector(firstStaff,firstLower).setType('singleLeft').setContext(context).draw();
+      new VF.StaveConnector(firstStaff,firstLower).setType('brace').setContext(context).draw();
+    }
     renderedSystemBreaks.push(Math.min(logicalHeight,top+(systemIndex+1)*systemHeight));
     // Everything VexFlow drew for this system is tagged with it, so PDF
     // export never mistakes a high beam for part of the system above.
